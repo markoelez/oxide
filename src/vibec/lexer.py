@@ -19,6 +19,7 @@ SIMPLE_TOKENS: dict[str, TokenType] = {
   "%": TokenType.PERCENT,
   "&": TokenType.AMP,
   "|": TokenType.PIPE,
+  "?": TokenType.QUESTION,
 }
 
 

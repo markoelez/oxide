@@ -2607,3 +2607,298 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 150  # 40 + 50 + 60
+
+  # === Result type tests ===
+
+  def test_result_ok_basic(self):
+    """Test creating and returning Ok value."""
+    source = """fn get_value() -> Result[i64, i64]:
+    Ok(42)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = get_value()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_result_err_basic(self):
+    """Test creating and returning Err value."""
+    source = """fn get_error() -> Result[i64, i64]:
+    Err(99)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = get_error()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 99
+
+  def test_result_try_ok(self):
+    """Test ? operator unwrapping Ok value."""
+    source = """fn get_value() -> Result[i64, i64]:
+    Ok(42)
+
+fn process() -> Result[i64, i64]:
+    let val: i64 = get_value()?
+    Ok(val + 8)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = process()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 50  # 42 + 8
+
+  def test_result_try_err(self):
+    """Test ? operator propagating Err value."""
+    source = """fn get_error() -> Result[i64, i64]:
+    Err(77)
+
+fn process() -> Result[i64, i64]:
+    let val: i64 = get_error()?
+    Ok(val + 100)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = process()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 77  # Error propagated
+
+  def test_result_try_chain(self):
+    """Test chaining multiple ? operators."""
+    source = """fn step1() -> Result[i64, i64]:
+    Ok(10)
+
+fn step2(x: i64) -> Result[i64, i64]:
+    Ok(x * 2)
+
+fn step3(x: i64) -> Result[i64, i64]:
+    Ok(x + 5)
+
+fn process() -> Result[i64, i64]:
+    let a: i64 = step1()?
+    let b: i64 = step2(a)?
+    let c: i64 = step3(b)?
+    Ok(c)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = process()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 25  # ((10 * 2) + 5) = 25
+
+  def test_result_try_chain_error(self):
+    """Test error short-circuits the chain."""
+    source = """fn step1() -> Result[i64, i64]:
+    Ok(10)
+
+fn step2(x: i64) -> Result[i64, i64]:
+    Err(55)
+
+fn step3(x: i64) -> Result[i64, i64]:
+    Ok(x + 100)
+
+fn process() -> Result[i64, i64]:
+    let a: i64 = step1()?
+    let b: i64 = step2(a)?
+    let c: i64 = step3(b)?
+    Ok(c)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = process()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 55  # Error from step2
+
+  def test_result_conditional(self):
+    """Test returning Ok or Err conditionally."""
+    source = """fn divide(a: i64, b: i64) -> Result[i64, i64]:
+    if b == 0:
+        return Err(1)
+    Ok(a / b)
+
+fn main() -> i64:
+    let res1: Result[i64, i64] = divide(10, 2)
+    let res2: Result[i64, i64] = divide(10, 0)
+    let v1: i64 = 0
+    match res1:
+        Ok(v):
+            v1 = v
+        Err(e):
+            v1 = 0
+    let v2: i64 = 0
+    match res2:
+        Ok(v):
+            v2 = v
+        Err(e):
+            v2 = e
+    return v1 + v2
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 6  # 5 + 1
+
+  def test_result_match_binding(self):
+    """Test match arm bindings with Result."""
+    source = """fn compute() -> Result[i64, i64]:
+    Ok(30)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = compute()
+    match res:
+        Ok(value):
+            return value + 12
+        Err(error):
+            return error * 2
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_result_match_err_binding(self):
+    """Test match arm bindings with Err Result."""
+    source = """fn compute() -> Result[i64, i64]:
+    Err(21)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = compute()
+    match res:
+        Ok(value):
+            return value + 100
+        Err(error):
+            return error * 2
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_result_explicit_return(self):
+    """Test explicit return of Result from function."""
+    source = """fn maybe_add(a: i64, b: i64) -> Result[i64, i64]:
+    if a < 0:
+        return Err(a)
+    if b < 0:
+        return Err(b)
+    return Ok(a + b)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = maybe_add(10, 20)
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30
+
+  def test_result_implicit_return_ok(self):
+    """Test implicit return of Ok from function."""
+    source = """fn get_value() -> Result[i64, i64]:
+    Ok(88)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = get_value()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 88
+
+  def test_result_implicit_return_err(self):
+    """Test implicit return of Err from function."""
+    source = """fn get_error() -> Result[i64, i64]:
+    Err(66)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = get_error()
+    match res:
+        Ok(v):
+            return 0
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 66
+
+  def test_result_in_loop(self):
+    """Test Result with loop."""
+    source = """fn check(x: i64) -> Result[i64, i64]:
+    if x > 5:
+        return Err(x)
+    Ok(x)
+
+fn process() -> Result[i64, i64]:
+    let sum: i64 = 0
+    for i in range(0, 10):
+        let r: Result[i64, i64] = check(i)
+        match r:
+            Ok(v):
+                sum = sum + v
+            Err(e):
+                return Err(e)
+    Ok(sum)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = process()
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 6  # Error at i=6
+
+  def test_result_try_in_loop(self):
+    """Test ? operator in loop."""
+    source = """fn validate(x: i64) -> Result[i64, i64]:
+    if x < 0:
+        return Err(x)
+    Ok(x * 2)
+
+fn sum_doubled(n: i64) -> Result[i64, i64]:
+    let sum: i64 = 0
+    for i in range(0, n):
+        let doubled: i64 = validate(i)?
+        sum = sum + doubled
+    Ok(sum)
+
+fn main() -> i64:
+    let res: Result[i64, i64] = sum_doubled(5)
+    match res:
+        Ok(v):
+            return v
+        Err(e):
+            return e
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 20  # 0 + 2 + 4 + 6 + 8 = 20

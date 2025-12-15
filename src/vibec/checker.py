@@ -7,11 +7,14 @@ from .ast import (
   Stmt,
   FnType,
   IfStmt,
+  OkExpr,
+  ErrExpr,
   ForStmt,
   LetStmt,
   Program,
   RefExpr,
   RefType,
+  TryExpr,
   VarExpr,
   VecType,
   CallExpr,
@@ -27,6 +30,7 @@ from .ast import (
   AssignStmt,
   BinaryExpr,
   IntLiteral,
+  ResultType,
   ReturnStmt,
   SimpleType,
   BoolLiteral,
@@ -183,6 +187,67 @@ def parse_fn_type(type_str: str) -> tuple[list[str], str] | None:
   # Simple comma split (doesn't handle nested types with commas)
   param_types = [p.strip() for p in params_str.split(",")]
   return (param_types, return_type)
+
+
+def is_result_type(type_str: str) -> bool:
+  """Check if type string represents a Result type."""
+  return type_str.startswith("Result[")
+
+
+def get_result_ok_type(type_str: str) -> str | None:
+  """Extract Ok type from Result type string like Result[i64,str] -> i64."""
+  if not is_result_type(type_str):
+    return None
+  inner = type_str[7:-1]  # Remove "Result[" and "]"
+  # Find the comma that separates Ok and Err types (handle nested types)
+  depth = 0
+  for i, c in enumerate(inner):
+    if c in "([":
+      depth += 1
+    elif c in ")]":
+      depth -= 1
+    elif c == "," and depth == 0:
+      return inner[:i]
+  return None
+
+
+def get_result_err_type(type_str: str) -> str | None:
+  """Extract Err type from Result type string like Result[i64,str] -> str."""
+  if not is_result_type(type_str):
+    return None
+  inner = type_str[7:-1]  # Remove "Result[" and "]"
+  # Find the comma that separates Ok and Err types (handle nested types)
+  depth = 0
+  for i, c in enumerate(inner):
+    if c in "([":
+      depth += 1
+    elif c in ")]":
+      depth -= 1
+    elif c == "," and depth == 0:
+      return inner[i + 1 :]
+  return None
+
+
+def result_types_compatible(actual: str, expected: str) -> bool:
+  """Check if actual Result type is compatible with expected Result type.
+
+  This handles partial types like Result[i64,?] and Result[?,i64] which can match
+  any concrete Result type with matching known parts.
+  """
+  if not is_result_type(actual) or not is_result_type(expected):
+    return False
+
+  actual_ok = get_result_ok_type(actual)
+  actual_err = get_result_err_type(actual)
+  expected_ok = get_result_ok_type(expected)
+  expected_err = get_result_err_type(expected)
+
+  # Check Ok type: must match, or actual can be '?' (unknown)
+  ok_match = actual_ok == expected_ok or actual_ok == "?"
+  # Check Err type: must match, or actual can be '?' (unknown)
+  err_match = actual_err == expected_err or actual_err == "?"
+
+  return ok_match and err_match
 
 
 @dataclass
@@ -428,6 +493,10 @@ class TypeChecker:
         param_strs = [self._check_type_ann(p) for p in params]
         ret_str = self._check_type_ann(ret)
         return f"Fn({','.join(param_strs)})->{ret_str}"
+      case ResultType(ok_type, err_type):
+        ok_str = self._check_type_ann(ok_type)
+        err_str = self._check_type_ann(err_type)
+        return f"Result[{ok_str},{err_str}]"
     raise TypeError(f"Unknown type annotation: {t}")
 
   def check(self, program: Program) -> None:
@@ -537,7 +606,11 @@ class TypeChecker:
       last_stmt = func.body[-1]
       if isinstance(last_stmt, ExprStmt):
         expr_type = self._check_expr(last_stmt.expr)
-        if expr_type != self.current_return_type:
+        # Handle Result type compatibility (partial types with '?')
+        if is_result_type(expr_type) and is_result_type(self.current_return_type):
+          if not result_types_compatible(expr_type, self.current_return_type):
+            raise TypeError(f"Implicit return type {expr_type} doesn't match function return type {self.current_return_type}")
+        elif expr_type != self.current_return_type:
           raise TypeError(f"Implicit return type {expr_type} doesn't match function return type {self.current_return_type}")
 
     self.current_return_type = None
@@ -554,6 +627,19 @@ class TypeChecker:
           pass  # OK: empty array assigned to array type
         elif value_type == "[]" and is_vec_type(declared_type):
           pass  # OK: empty array assigned to vec type
+        # Handle Result type unification for Ok/Err
+        elif is_result_type(declared_type) and value_type.startswith("Result["):
+          # Unify partial Result types (Ok or Err with ?)
+          declared_ok = get_result_ok_type(declared_type)
+          declared_err = get_result_err_type(declared_type)
+          value_ok = get_result_ok_type(value_type)
+          value_err = get_result_err_type(value_type)
+          # Check Ok types match (allow ? as wildcard)
+          if value_ok != "?" and value_ok != declared_ok:
+            raise TypeError(f"Result Ok type mismatch: expected {declared_ok}, got {value_ok}")
+          # Check Err types match (allow ? as wildcard)
+          if value_err != "?" and value_err != declared_err:
+            raise TypeError(f"Result Err type mismatch: expected {declared_err}, got {value_err}")
         elif value_type != declared_type:
           raise TypeError(f"Cannot assign {value_type} to variable of type {declared_type}")
         # Mark source variable as moved if applicable
@@ -588,7 +674,19 @@ class TypeChecker:
 
       case ReturnStmt(value):
         value_type = self._check_expr(value)
-        if value_type != self.current_return_type:
+        # Handle Result type unification for Ok/Err returns
+        if self.current_return_type and is_result_type(self.current_return_type) and value_type.startswith("Result["):
+          declared_ok = get_result_ok_type(self.current_return_type)
+          declared_err = get_result_err_type(self.current_return_type)
+          value_ok = get_result_ok_type(value_type)
+          value_err = get_result_err_type(value_type)
+          # Check Ok types match (allow ? as wildcard)
+          if value_ok != "?" and value_ok != declared_ok:
+            raise TypeError(f"Result Ok type mismatch: expected {declared_ok}, got {value_ok}")
+          # Check Err types match (allow ? as wildcard)
+          if value_err != "?" and value_err != declared_err:
+            raise TypeError(f"Result Err type mismatch: expected {declared_err}, got {value_err}")
+        elif value_type != self.current_return_type:
           raise TypeError(f"Cannot return {value_type} from function returning {self.current_return_type}")
 
       case ExprStmt(expr):
@@ -768,12 +866,50 @@ class TypeChecker:
 
       case MatchExpr(target, arms):
         target_type = self._check_expr(target)
+
+        # Handle Result types
+        if is_result_type(target_type):
+          ok_type = get_result_ok_type(target_type)
+          err_type = get_result_err_type(target_type)
+
+          # Check each arm
+          covered_variants: set[str] = set()
+          for arm in arms:
+            if arm.enum_name != "Result":
+              raise TypeError(f"Match arm pattern uses wrong type '{arm.enum_name}', expected 'Result'")
+            if arm.variant_name not in ("Ok", "Err"):
+              raise TypeError(f"Result has no variant '{arm.variant_name}'")
+            if arm.variant_name in covered_variants:
+              raise TypeError(f"Duplicate match arm for variant '{arm.variant_name}'")
+            covered_variants.add(arm.variant_name)
+
+            # Check binding
+            self._enter_scope()
+            if arm.binding is not None:
+              binding_type = ok_type if arm.variant_name == "Ok" else err_type
+              if binding_type is not None:
+                self._define_var(arm.binding, binding_type)
+
+            # Check arm body
+            for stmt in arm.body:
+              self._check_stmt(stmt)
+            self._exit_scope()
+
+          # Check exhaustiveness
+          missing = {"Ok", "Err"} - covered_variants
+          if missing:
+            raise TypeError(f"Non-exhaustive match: missing variants {', '.join(sorted(missing))}")
+
+          # Match expressions always return i64 (from return statements in arms)
+          return "i64"
+
+        # Handle regular enums
         if target_type not in self.enums:
           raise TypeError(f"Cannot match on non-enum type {target_type}")
         enum_info = self.enums[target_type]
 
         # Check each arm
-        covered_variants: set[str] = set()
+        covered_variants = set()
         for arm in arms:
           if arm.enum_name != target_type:
             raise TypeError(f"Match arm pattern uses wrong enum '{arm.enum_name}', expected '{target_type}'")
@@ -974,6 +1110,39 @@ class TypeChecker:
         if inner_type is None:
           raise TypeError(f"Invalid reference type '{target_type}'")
         return inner_type
+
+      case OkExpr(value):
+        # Ok(value) - creates a Result, but we need context to know the Err type
+        # For now, we mark this as a partial Result that will be unified with context
+        value_type = self._check_expr(value)
+        # Return a marker type that will be unified with expected Result type
+        return f"Result[{value_type},?]"
+
+      case ErrExpr(value):
+        # Err(error) - creates a Result, but we need context to know the Ok type
+        value_type = self._check_expr(value)
+        return f"Result[?,{value_type}]"
+
+      case TryExpr(target):
+        # expr? - unwraps Ok or returns early with Err
+        target_type = self._check_expr(target)
+        if not is_result_type(target_type):
+          raise TypeError(f"The '?' operator can only be used on Result types, got {target_type}")
+        # Verify current function returns a compatible Result type
+        if self.current_return_type is None:
+          raise TypeError("The '?' operator can only be used inside a function")
+        if not is_result_type(self.current_return_type):
+          raise TypeError(f"The '?' operator requires function to return Result, but returns {self.current_return_type}")
+        # Check error types are compatible
+        expr_err_type = get_result_err_type(target_type)
+        func_err_type = get_result_err_type(self.current_return_type)
+        if expr_err_type != func_err_type:
+          raise TypeError(f"Error type mismatch: expression has {expr_err_type}, function returns {func_err_type}")
+        # Return the Ok type (unwrapped)
+        ok_type = get_result_ok_type(target_type)
+        if ok_type is None:
+          raise TypeError(f"Invalid Result type: {target_type}")
+        return ok_type
 
     raise TypeError(f"Unknown expression type: {type(expr)}")
 

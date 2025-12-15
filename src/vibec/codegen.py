@@ -5,11 +5,14 @@ from .ast import (
   Stmt,
   FnType,
   IfStmt,
+  OkExpr,
+  ErrExpr,
   ForStmt,
   LetStmt,
   Program,
   RefExpr,
   RefType,
+  TryExpr,
   VarExpr,
   VecType,
   CallExpr,
@@ -27,6 +30,7 @@ from .ast import (
   AssignStmt,
   BinaryExpr,
   IntLiteral,
+  ResultType,
   ReturnStmt,
   SimpleType,
   BoolLiteral,
@@ -58,6 +62,8 @@ def type_to_str(t: TypeAnnotation) -> str:
       return f"vec[{type_to_str(elem)}]"
     case TupleType(elems):
       return f"({','.join(type_to_str(e) for e in elems)})"
+    case ResultType(ok_type, err_type):
+      return f"Result[{type_to_str(ok_type)},{type_to_str(err_type)}]"
     case RefType(inner, mutable):
       prefix = "&mut " if mutable else "&"
       return f"{prefix}{type_to_str(inner)}"
@@ -92,6 +98,11 @@ def is_tuple_type(type_str: str) -> bool:
 def is_enum_type(type_str: str, enums: dict[str, dict[str, tuple[int, bool]]]) -> bool:
   """Check if type is an enum."""
   return type_str in enums
+
+
+def is_result_type(type_str: str) -> bool:
+  """Check if type is a Result."""
+  return type_str.startswith("Result[")
 
 
 def get_tuple_size(type_str: str) -> int:
@@ -267,6 +278,12 @@ class CodeGenerator:
         self._collect_strings_from_expr(target)
         for arg in args:
           self._collect_strings_from_expr(arg)
+      case OkExpr(value):
+        self._collect_strings_from_expr(value)
+      case ErrExpr(value):
+        self._collect_strings_from_expr(value)
+      case TryExpr(target):
+        self._collect_strings_from_expr(target)
       case _:
         pass
 
@@ -414,6 +431,8 @@ class CodeGenerator:
         return 1  # List is a pointer
       case TupleType(elems):
         return len(elems)  # One slot per element
+      case ResultType(_, _):
+        return 2  # Result needs 2 slots: tag (0=Ok, 1=Err) + payload
       case SimpleType(name):
         if name in self.structs:
           return len(self.structs[name])  # One slot per field
@@ -484,8 +503,8 @@ class CodeGenerator:
       self.locals[param.name] = (offset, type_str)
       slots_needed = self._slots_for_type(param.type_ann)
 
-      if type_str in self.enums:
-        # Enum: store tag from x{reg_idx}, payload from x{reg_idx+1}
+      if type_str in self.enums or is_result_type(type_str):
+        # Enum/Result: store tag from x{reg_idx}, payload from x{reg_idx+1}
         if reg_idx < 8:
           self._emit(f"    str x{reg_idx}, [x29, #{offset}]")  # Tag
         if reg_idx + 1 < 8:
@@ -615,6 +634,27 @@ class CodeGenerator:
               case _:
                 self._emit(f"    str xzr, [x29, #{offset}]")  # Tag = 0
                 self._emit(f"    str xzr, [x29, #{offset - 8}]")  # Payload = 0
+            self.next_slot += 2
+
+          case ResultType(_, _):
+            # Result type: tag (0=Ok, 1=Err) + payload (2 slots)
+            match value:
+              case OkExpr(ok_value):
+                self._emit("    mov x0, #0")  # Ok tag = 0
+                self._emit(f"    str x0, [x29, #{offset}]")
+                self._gen_expr(ok_value)
+                self._emit(f"    str x0, [x29, #{offset - 8}]")
+              case ErrExpr(err_value):
+                self._emit("    mov x0, #1")  # Err tag = 1
+                self._emit(f"    str x0, [x29, #{offset}]")
+                self._gen_expr(err_value)
+                self._emit(f"    str x0, [x29, #{offset - 8}]")
+              case _:
+                # Expression that returns a Result (e.g., function call)
+                self._gen_expr(value)
+                # x0 has tag, x1 has payload (if Result was returned from function)
+                self._emit(f"    str x0, [x29, #{offset}]")
+                self._emit(f"    str x1, [x29, #{offset - 8}]")
             self.next_slot += 2
 
           case _:
@@ -795,8 +835,11 @@ class CodeGenerator:
         self._emit(f"    add x0, x0, {label}@PAGEOFF")
 
       case VarExpr(name):
-        offset, _ = self.locals[name]
+        offset, type_str = self.locals[name]
         self._emit(f"    ldr x0, [x29, #{offset}]")
+        # For Result types, also load payload into x1
+        if is_result_type(type_str):
+          self._emit(f"    ldr x1, [x29, #{offset - 8}]")
 
       case BinaryExpr(left, op, right):
         # Evaluate left to x0, push to stack
@@ -1024,6 +1067,37 @@ class CodeGenerator:
         # Call through function pointer
         self._emit("    blr x9")
 
+      case OkExpr(value):
+        # Ok(value) - create Result with tag=0 (Ok) and payload=value
+        self._gen_expr(value)
+        self._emit("    mov x1, x0")  # Payload in x1
+        self._emit("    mov x0, #0")  # Tag in x0 (Ok = 0)
+
+      case ErrExpr(value):
+        # Err(error) - create Result with tag=1 (Err) and payload=error
+        self._gen_expr(value)
+        self._emit("    mov x1, x0")  # Payload in x1
+        self._emit("    mov x0, #1")  # Tag in x0 (Err = 1)
+
+      case TryExpr(target):
+        # expr? - check if Result is Err, if so return early, otherwise unwrap Ok
+        self._gen_expr(target)
+        # x0 = tag, x1 = payload
+        err_label = self._new_label("try_err")
+        ok_label = self._new_label("try_ok")
+        # Check if tag is Err (1)
+        self._emit("    cmp x0, #1")
+        self._emit(f"    b.eq {err_label}")
+        # Ok path: result is in x1 (payload), move to x0
+        self._emit("    mov x0, x1")
+        self._emit(f"    b {ok_label}")
+        # Err path: return early with Err
+        self._emit(f"{err_label}:")
+        self._emit("    mov x0, #1")  # Tag = Err
+        # x1 already has error payload
+        self._emit(f"    b _{self.current_func_name}_epilogue")
+        self._emit(f"{ok_label}:")
+
   def _gen_print(self, args: tuple[Expr, ...]) -> None:
     """Generate code for print() builtin.
 
@@ -1084,21 +1158,21 @@ class CodeGenerator:
 
   def _gen_call(self, name: str, args: tuple[Expr, ...]) -> None:
     """Generate code for a function call."""
-    # Count total register slots needed (enums use 2)
-    slot_info: list[tuple[Expr, bool]] = []  # (arg, is_enum)
+    # Count total register slots needed (enums and Results use 2)
+    slot_info: list[tuple[Expr, bool]] = []  # (arg, is_two_slot)
     for arg in args:
-      is_enum = False
+      is_two_slot = False
       match arg:
         case VarExpr(var_name):
           if var_name in self.locals:
             _, type_str = self.locals[var_name]
-            is_enum = type_str in self.enums
-      slot_info.append((arg, is_enum))
+            is_two_slot = type_str in self.enums or is_result_type(type_str)
+      slot_info.append((arg, is_two_slot))
 
     # Evaluate arguments and push to stack (in reverse order)
-    for arg, is_enum in reversed(slot_info):
-      if is_enum:
-        # Push both tag and payload for enums
+    for arg, is_two_slot in reversed(slot_info):
+      if is_two_slot:
+        # Push both tag and payload for enums/Results
         match arg:
           case VarExpr(var_name):
             offset, _ = self.locals[var_name]
@@ -1107,16 +1181,18 @@ class CodeGenerator:
             self._emit(f"    ldr x0, [x29, #{offset}]")  # Tag (will be popped first)
             self._emit("    str x0, [sp, #-16]!")
           case _:
+            # Expression that returns enum/Result (x0=tag, x1=payload)
             self._gen_expr(arg)
-            self._emit("    str x0, [sp, #-16]!")
+            self._emit("    str x1, [sp, #-16]!")  # Payload first
+            self._emit("    str x0, [sp, #-16]!")  # Tag second
       else:
         self._gen_expr(arg)
         self._emit("    str x0, [sp, #-16]!")
 
     # Pop arguments into registers
     reg_idx = 0
-    for _, is_enum in slot_info:
-      if is_enum:
+    for _, is_two_slot in slot_info:
+      if is_two_slot:
         self._emit(f"    ldr x{reg_idx}, [sp], #16")  # Tag
         reg_idx += 1
         self._emit(f"    ldr x{reg_idx}, [sp], #16")  # Payload
@@ -1952,16 +2028,25 @@ class CodeGenerator:
     """Generate code for a match expression."""
     end_label = self._new_label("match_end")
 
-    # Get the enum variable's tag
+    # Check if this is a Result type match
+    is_result_match = arms[0].enum_name == "Result" if arms else False
+
+    # Get the enum/Result variable's tag and payload offset
+    var_offset: int | None = None
     match target:
       case VarExpr(name):
-        var_offset, _ = self.locals[name]
-        # Load tag from first slot of enum variable
+        var_offset, type_str = self.locals[name]
+        # Load tag from first slot
         self._emit(f"    ldr x8, [x29, #{var_offset}]")  # Tag in x8
+        # For Result, also save payload location for binding
+        if is_result_match or is_result_type(type_str):
+          is_result_match = True
       case _:
-        # For complex expressions, we'd need to evaluate and store
+        # For complex expressions, evaluate - for Result x0=tag, x1=payload
         self._gen_expr(target)
-        self._emit("    mov x8, x0")
+        self._emit("    mov x8, x0")  # Tag in x8
+        if is_result_match:
+          self._emit("    mov x9, x1")  # Payload in x9
 
     # Generate comparison chain for each arm
     arm_labels: list[str] = []
@@ -1969,8 +2054,12 @@ class CodeGenerator:
       arm_labels.append(self._new_label("match_arm"))
 
     for i, arm in enumerate(arms):
-      variants = self.enums[arm.enum_name]
-      tag, has_payload = variants[arm.variant_name]
+      if is_result_match:
+        # Result: Ok=0, Err=1
+        tag = 0 if arm.variant_name == "Ok" else 1
+      else:
+        variants = self.enums[arm.enum_name]
+        tag, _ = variants[arm.variant_name]
 
       # Compare tag
       self._emit(f"    cmp x8, #{tag}")
@@ -1982,20 +2071,29 @@ class CodeGenerator:
     # Generate code for each arm
     for i, arm in enumerate(arms):
       self._emit(f"{arm_labels[i]}:")
-      variants = self.enums[arm.enum_name]
-      _, has_payload = variants[arm.variant_name]
+
+      if is_result_match:
+        # Result always has payload
+        has_payload = True
+      else:
+        variants = self.enums[arm.enum_name]
+        _, has_payload = variants[arm.variant_name]
 
       # If there's a binding, allocate slot and store payload
       if arm.binding is not None and has_payload:
         binding_offset = -16 - (self.next_slot * 8)
         self.locals[arm.binding] = (binding_offset, "i64")  # Assume i64 for now
         self.next_slot += 1
-        # Load payload from enum variable
+        # Load payload from enum/Result variable
         match target:
           case VarExpr(name):
-            var_offset, _ = self.locals[name]
-            self._emit(f"    ldr x0, [x29, #{var_offset - 8}]")  # Payload
+            var_offset_local, _ = self.locals[name]
+            self._emit(f"    ldr x0, [x29, #{var_offset_local - 8}]")  # Payload
             self._emit(f"    str x0, [x29, #{binding_offset}]")
+          case _:
+            # Payload was saved in x9
+            if is_result_match:
+              self._emit(f"    str x9, [x29, #{binding_offset}]")
 
       # Generate arm body
       for stmt in arm.body:

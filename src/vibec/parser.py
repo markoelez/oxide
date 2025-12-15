@@ -5,12 +5,15 @@ from .ast import (
   Stmt,
   FnType,
   IfStmt,
+  OkExpr,
   EnumDef,
+  ErrExpr,
   ForStmt,
   LetStmt,
   Program,
   RefExpr,
   RefType,
+  TryExpr,
   VarExpr,
   VecType,
   CallExpr,
@@ -30,6 +33,7 @@ from .ast import (
   AssignStmt,
   BinaryExpr,
   IntLiteral,
+  ResultType,
   ReturnStmt,
   SimpleType,
   BoolLiteral,
@@ -331,6 +335,15 @@ class Parser:
       return_type = self._parse_type()
       return FnType(tuple(param_types), return_type)
 
+    # Check for Result[T, E]
+    if token.value == "Result" and self._check(TokenType.LBRACKET):
+      self._advance()
+      ok_type = self._parse_type()
+      self._expect(TokenType.COMMA, "Expected ',' in Result type")
+      err_type = self._parse_type()
+      self._expect(TokenType.RBRACKET, "Expected ']' in Result type")
+      return ResultType(ok_type, err_type)
+
     return SimpleType(token.value)
 
   def _parse_block(self) -> list[Stmt]:
@@ -593,12 +606,23 @@ class Parser:
           payload = self._parse_expression()
           self._expect(TokenType.RPAREN, "Expected ')'")
         return self._parse_postfix(EnumLiteral(name, variant_name.value, payload))
+      # Check for Ok(value) and Err(value) - Result constructors
+      elif name == "Ok" and self._check(TokenType.LPAREN):
+        self._advance()
+        value = self._parse_expression()
+        self._expect(TokenType.RPAREN, "Expected ')' after Ok value")
+        expr: Expr = OkExpr(value)
+      elif name == "Err" and self._check(TokenType.LPAREN):
+        self._advance()
+        value = self._parse_expression()
+        self._expect(TokenType.RPAREN, "Expected ')' after Err value")
+        expr = ErrExpr(value)
       # Check if it's a function call
       elif self._check(TokenType.LPAREN):
         self._advance()
         args, kwargs = self._parse_arguments()
         self._expect(TokenType.RPAREN, "Expected ')'")
-        expr: Expr = CallExpr(name, tuple(args), tuple(kwargs))
+        expr = CallExpr(name, tuple(args), tuple(kwargs))
       # Check if it's a struct literal: Name { field: value, ... }
       elif self._check(TokenType.LBRACE):
         expr = self._parse_struct_literal(name)
@@ -637,7 +661,7 @@ class Parser:
       raise ParseError(f"Unexpected token '{token.value}'", token)
 
   def _parse_postfix(self, expr: Expr) -> Expr:
-    """Parse postfix operations: indexing [i], field access .field, tuple index .0, method calls .method(), closure calls ()."""
+    """Parse postfix operations: indexing [i], field access .field, tuple index .0, method calls .method(), try ?."""
     while True:
       if self._check(TokenType.LBRACKET):
         # Index expression: expr[index]
@@ -667,6 +691,10 @@ class Parser:
             expr = FieldAccessExpr(expr, member_token.value)
         else:
           raise ParseError("Expected field name or tuple index", self._current())
+      elif self._check(TokenType.QUESTION):
+        # Try expression: expr?
+        self._advance()
+        expr = TryExpr(expr)
       else:
         break
     return expr
@@ -724,22 +752,36 @@ class Parser:
       if self._check(TokenType.DEDENT, TokenType.EOF):
         break
 
-      # Parse arm pattern: EnumName::Variant or EnumName::Variant(binding)
-      enum_name = self._expect(TokenType.IDENT, "Expected enum name")
-      self._expect(TokenType.COLONCOLON, "Expected '::'")
-      variant_name = self._expect(TokenType.IDENT, "Expected variant name")
+      # Parse arm pattern: EnumName::Variant(binding) or Ok(binding)/Err(binding) for Result
+      first_ident = self._expect(TokenType.IDENT, "Expected enum name or variant")
 
-      binding: str | None = None
-      if self._check(TokenType.LPAREN):
-        self._advance()
+      # Check if this is Ok/Err (Result shorthand) or EnumName::Variant
+      if first_ident.value in ("Ok", "Err") and self._check(TokenType.LPAREN):
+        # Result shorthand: Ok(binding) or Err(binding)
+        enum_name = "Result"
+        variant_name = first_ident.value
+        self._advance()  # consume '('
         binding_token = self._expect(TokenType.IDENT, "Expected binding name")
-        binding = binding_token.value
+        binding: str | None = binding_token.value
         self._expect(TokenType.RPAREN, "Expected ')'")
+      else:
+        # Standard enum: EnumName::Variant or EnumName::Variant(binding)
+        enum_name = first_ident.value
+        self._expect(TokenType.COLONCOLON, "Expected '::'")
+        variant_token = self._expect(TokenType.IDENT, "Expected variant name")
+        variant_name = variant_token.value
+
+        binding = None
+        if self._check(TokenType.LPAREN):
+          self._advance()
+          binding_token = self._expect(TokenType.IDENT, "Expected binding name")
+          binding = binding_token.value
+          self._expect(TokenType.RPAREN, "Expected ')'")
 
       self._expect(TokenType.COLON, "Expected ':'")
       self._expect(TokenType.NEWLINE, "Expected newline after ':'")
       body = self._parse_block()
-      arms.append(MatchArm(enum_name.value, variant_name.value, binding, tuple(body)))
+      arms.append(MatchArm(enum_name, variant_name, binding, tuple(body)))
 
     self._expect(TokenType.DEDENT, "Expected dedent")
     return MatchExpr(target, tuple(arms))

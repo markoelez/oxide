@@ -50,8 +50,16 @@ class FnType:
   return_type: "TypeAnnotation"
 
 
+@dataclass(frozen=True, slots=True)
+class ResultType:
+  """Result type: Result[T, E]."""
+
+  ok_type: "TypeAnnotation"
+  err_type: "TypeAnnotation"
+
+
 # Type annotation union
-TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType | FnType
+TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType | FnType | ResultType
 
 
 # === Expressions ===
@@ -225,6 +233,27 @@ class ClosureCallExpr:
   args: tuple["Expr", ...]
 
 
+@dataclass(frozen=True, slots=True)
+class OkExpr:
+  """Ok(value) expression for Result type."""
+
+  value: "Expr"
+
+
+@dataclass(frozen=True, slots=True)
+class ErrExpr:
+  """Err(error) expression for Result type."""
+
+  value: "Expr"
+
+
+@dataclass(frozen=True, slots=True)
+class TryExpr:
+  """Try expression: expr? - unwraps Ok or returns Err early."""
+
+  target: "Expr"
+
+
 # Expression union type
 Expr = (
   IntLiteral
@@ -247,6 +276,9 @@ Expr = (
   | DerefExpr
   | ClosureExpr
   | ClosureCallExpr
+  | OkExpr
+  | ErrExpr
+  | TryExpr
 )
 
 

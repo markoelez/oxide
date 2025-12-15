@@ -64,6 +64,30 @@ fn main() -> i64:
     0  # Implicit return
 ```
 
+**Result Type and Error Propagation (like Rust):**
+```
+# Function that can fail returns Result[OkType, ErrType]
+fn divide(a: i64, b: i64) -> Result[i64, i64]:
+    if b == 0:
+        return Err(1)  # Error code for division by zero
+    Ok(a / b)
+
+# The ? operator unwraps Ok or propagates Err
+fn calculate(x: i64, y: i64, z: i64) -> Result[i64, i64]:
+    let step1: i64 = divide(x, y)?  # Returns early with Err if y == 0
+    let step2: i64 = divide(step1, z)?  # Returns early with Err if z == 0
+    Ok(step1 + step2)
+
+fn main() -> i64:
+    let result: Result[i64, i64] = calculate(100, 5, 2)
+    match result:
+        Ok(value):
+            print(value)  # 30
+        Err(error):
+            print(error)
+    0
+```
+
 **Functional Iterator Methods:**
 ```
 fn main() -> i64:
@@ -80,7 +104,7 @@ fn main() -> i64:
     0
 ```
 
-**Supported:** functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
+**Supported:** `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture

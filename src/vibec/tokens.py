@@ -54,6 +54,7 @@ class TokenType(Enum):
   PERCENT = auto()
   AMP = auto()  # & for references
   PIPE = auto()  # | for closures
+  QUESTION = auto()  # ? for try operator
 
   # Comparison
   EQ = auto()

@@ -2,14 +2,25 @@
 
 from .tokens import KEYWORDS, Token, TokenType
 
+# Single-character tokens
+SIMPLE_TOKENS: dict[str, TokenType] = {
+  "(": TokenType.LPAREN,
+  ")": TokenType.RPAREN,
+  ":": TokenType.COLON,
+  ",": TokenType.COMMA,
+  "+": TokenType.PLUS,
+  "*": TokenType.STAR,
+  "/": TokenType.SLASH,
+  "%": TokenType.PERCENT,
+}
+
 
 class LexerError(Exception):
   """Raised when the lexer encounters invalid input."""
 
   def __init__(self, message: str, line: int, column: int) -> None:
     super().__init__(f"{message} at line {line}, column {column}")
-    self.line = line
-    self.column = column
+    self.line, self.column = line, column
 
 
 class Lexer:
@@ -25,76 +36,51 @@ class Lexer:
     self.at_line_start = True
 
   def _current(self) -> str:
-    if self.pos >= len(self.source):
-      return ""
-    return self.source[self.pos]
-
-  def _peek(self, offset: int = 1) -> str:
-    pos = self.pos + offset
-    if pos >= len(self.source):
-      return ""
-    return self.source[pos]
+    return self.source[self.pos] if self.pos < len(self.source) else ""
 
   def _advance(self) -> str:
     ch = self._current()
     self.pos += 1
-    if ch == "\n":
-      self.line += 1
-      self.column = 1
-    else:
-      self.column += 1
+    self.line, self.column = (self.line + 1, 1) if ch == "\n" else (self.line, self.column + 1)
     return ch
 
-  def _add_token(self, type: TokenType, value: str, line: int, column: int) -> None:
-    self.tokens.append(Token(type, value, line, column))
+  def _emit(self, type: TokenType, value: str, line: int, col: int) -> None:
+    self.tokens.append(Token(type, value, line, col))
 
-  def _skip_comment(self) -> None:
-    while self._current() and self._current() != "\n":
-      self._advance()
-
-  def _read_string_while(self, predicate: callable) -> str:
+  def _read_while(self, pred) -> str:
     start = self.pos
-    while self._current() and predicate(self._current()):
+    while self._current() and pred(self._current()):
       self._advance()
     return self.source[start : self.pos]
 
   def _handle_indentation(self) -> None:
     """Process indentation at the start of a line."""
-    line_start = self.line
-    col_start = self.column
-
-    # Count spaces (we only support spaces, not tabs)
-    indent = 0
-    while self._current() == " ":
-      self._advance()
-      indent += 1
+    line, col = self.line, self.column
+    indent = len(self._read_while(lambda c: c == " "))
 
     # Skip blank lines and comments
-    if self._current() == "\n" or self._current() == "#" or self._current() == "":
+    if self._current() in ("\n", "#", ""):
       return
 
-    current_indent = self.indent_stack[-1]
-
-    if indent > current_indent:
+    current = self.indent_stack[-1]
+    if indent > current:
       self.indent_stack.append(indent)
-      self._add_token(TokenType.INDENT, "", line_start, col_start)
-    elif indent < current_indent:
-      while self.indent_stack and self.indent_stack[-1] > indent:
+      self._emit(TokenType.INDENT, "", line, col)
+    elif indent < current:
+      while self.indent_stack[-1] > indent:
         self.indent_stack.pop()
-        self._add_token(TokenType.DEDENT, "", line_start, col_start)
+        self._emit(TokenType.DEDENT, "", line, col)
       if self.indent_stack[-1] != indent:
-        raise LexerError("Inconsistent indentation", line_start, col_start)
+        raise LexerError("Inconsistent indentation", line, col)
 
-  def _read_number(self) -> None:
-    line, col = self.line, self.column
-    num = self._read_string_while(lambda c: c.isdigit())
-    self._add_token(TokenType.INT, num, line, col)
-
-  def _read_identifier(self) -> None:
-    line, col = self.line, self.column
-    ident = self._read_string_while(lambda c: c.isalnum() or c == "_")
-    token_type = KEYWORDS.get(ident, TokenType.IDENT)
-    self._add_token(token_type, ident, line, col)
+  def _two_char_token(self, second: str, two_type: TokenType, one_type: TokenType, line: int, col: int) -> None:
+    """Handle potential two-character tokens like ==, !=, <=, >=, ->."""
+    self._advance()
+    if self._current() == second:
+      self._advance()
+      self._emit(two_type, f"{self.source[self.pos - 2]}{second}", line, col)
+    else:
+      self._emit(one_type, self.source[self.pos - 1], line, col)
 
   def tokenize(self) -> list[Token]:
     """Tokenize the entire source and return a list of tokens."""
@@ -106,93 +92,50 @@ class Lexer:
       ch = self._current()
       line, col = self.line, self.column
 
-      if ch == "":
-        break
-      elif ch == "\n":
-        self._advance()
-        # Only emit NEWLINE if there's meaningful content before it
-        if self.tokens and self.tokens[-1].type not in (
-          TokenType.NEWLINE,
-          TokenType.INDENT,
-        ):
-          self._add_token(TokenType.NEWLINE, "\\n", line, col)
-        self.at_line_start = True
-      elif ch == " ":
-        self._advance()
-      elif ch == "#":
-        self._skip_comment()
-      elif ch.isdigit():
-        self._read_number()
-      elif ch.isalpha() or ch == "_":
-        self._read_identifier()
-      elif ch == "(":
-        self._advance()
-        self._add_token(TokenType.LPAREN, "(", line, col)
-      elif ch == ")":
-        self._advance()
-        self._add_token(TokenType.RPAREN, ")", line, col)
-      elif ch == ":":
-        self._advance()
-        self._add_token(TokenType.COLON, ":", line, col)
-      elif ch == ",":
-        self._advance()
-        self._add_token(TokenType.COMMA, ",", line, col)
-      elif ch == "+":
-        self._advance()
-        self._add_token(TokenType.PLUS, "+", line, col)
-      elif ch == "-":
-        self._advance()
-        if self._current() == ">":
+      match ch:
+        case "":
+          break
+        case "\n":
           self._advance()
-          self._add_token(TokenType.ARROW, "->", line, col)
-        else:
-          self._add_token(TokenType.MINUS, "-", line, col)
-      elif ch == "*":
-        self._advance()
-        self._add_token(TokenType.STAR, "*", line, col)
-      elif ch == "/":
-        self._advance()
-        self._add_token(TokenType.SLASH, "/", line, col)
-      elif ch == "%":
-        self._advance()
-        self._add_token(TokenType.PERCENT, "%", line, col)
-      elif ch == "=":
-        self._advance()
-        if self._current() == "=":
+          if self.tokens and self.tokens[-1].type not in (TokenType.NEWLINE, TokenType.INDENT):
+            self._emit(TokenType.NEWLINE, "\\n", line, col)
+          self.at_line_start = True
+        case " ":
           self._advance()
-          self._add_token(TokenType.EQ, "==", line, col)
-        else:
-          self._add_token(TokenType.ASSIGN, "=", line, col)
-      elif ch == "!":
-        self._advance()
-        if self._current() == "=":
+        case "#":
+          self._read_while(lambda c: c != "\n")
+        case c if c.isdigit():
+          self._emit(TokenType.INT, self._read_while(str.isdigit), line, col)
+        case c if c.isalpha() or c == "_":
+          ident = self._read_while(lambda c: c.isalnum() or c == "_")
+          self._emit(KEYWORDS.get(ident, TokenType.IDENT), ident, line, col)
+        case "-":
+          self._two_char_token(">", TokenType.ARROW, TokenType.MINUS, line, col)
+        case "=":
+          self._two_char_token("=", TokenType.EQ, TokenType.ASSIGN, line, col)
+        case "!":
           self._advance()
-          self._add_token(TokenType.NE, "!=", line, col)
-        else:
-          raise LexerError(f"Unexpected character '!'", line, col)
-      elif ch == "<":
-        self._advance()
-        if self._current() == "=":
+          if self._current() == "=":
+            self._advance()
+            self._emit(TokenType.NE, "!=", line, col)
+          else:
+            raise LexerError("Unexpected character '!'", line, col)
+        case "<":
+          self._two_char_token("=", TokenType.LE, TokenType.LT, line, col)
+        case ">":
+          self._two_char_token("=", TokenType.GE, TokenType.GT, line, col)
+        case c if c in SIMPLE_TOKENS:
           self._advance()
-          self._add_token(TokenType.LE, "<=", line, col)
-        else:
-          self._add_token(TokenType.LT, "<", line, col)
-      elif ch == ">":
-        self._advance()
-        if self._current() == "=":
-          self._advance()
-          self._add_token(TokenType.GE, ">=", line, col)
-        else:
-          self._add_token(TokenType.GT, ">", line, col)
-      else:
-        raise LexerError(f"Unexpected character '{ch}'", line, col)
+          self._emit(SIMPLE_TOKENS[c], c, line, col)
+        case _:
+          raise LexerError(f"Unexpected character '{ch}'", line, col)
 
     # Emit remaining DEDENTs at end of file
     while len(self.indent_stack) > 1:
       self.indent_stack.pop()
-      self._add_token(TokenType.DEDENT, "", self.line, self.column)
+      self._emit(TokenType.DEDENT, "", self.line, self.column)
 
-    self._add_token(TokenType.EOF, "", self.line, self.column)
+    self._emit(TokenType.EOF, "", self.line, self.column)
     return self.tokens
 
 

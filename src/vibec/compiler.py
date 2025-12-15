@@ -52,7 +52,7 @@ class Compiler:
   def compile_to_binary(self, source: str, output_path: Path, keep_asm: bool = False) -> CompileResult:
     """Compile source code to an executable binary."""
     result = self.compile_to_asm(source)
-    if not result.success:
+    if not result.success or result.assembly is None:
       return result
 
     try:

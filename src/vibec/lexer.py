@@ -18,6 +18,7 @@ SIMPLE_TOKENS: dict[str, TokenType] = {
   "/": TokenType.SLASH,
   "%": TokenType.PERCENT,
   "&": TokenType.AMP,
+  "|": TokenType.PIPE,
 }
 
 

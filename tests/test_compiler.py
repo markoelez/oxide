@@ -104,6 +104,13 @@ class TestLexer:
     assert TokenType.AMP in types
     assert TokenType.MUT in types
 
+  def test_pipe(self):
+    source = "|a, b|"
+    tokens = tokenize(source)
+    types = [t.type for t in tokens]
+    assert types[0] == TokenType.PIPE
+    assert types[4] == TokenType.PIPE
+
   def test_string_literal(self):
     source = '"hello world"'
     tokens = tokenize(source)
@@ -584,6 +591,53 @@ fn main() -> i64:
 
     stmt = ast.functions[0].body[2]
     assert isinstance(stmt, DerefAssignStmt)
+
+  # === Closure parsing tests ===
+
+  def test_closure_parse_basic(self):
+    source = """fn main() -> i64:
+    let add: Fn(i64, i64) -> i64 = |a: i64, b: i64| -> i64: a + b
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import FnType, LetStmt, ClosureExpr
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.type_ann, FnType)
+    assert isinstance(stmt.value, ClosureExpr)
+    assert len(stmt.value.params) == 2
+
+  def test_closure_parse_no_params(self):
+    source = """fn main() -> i64:
+    let f: Fn() -> i64 = || -> i64: 42
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import LetStmt, ClosureExpr
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.value, ClosureExpr)
+    assert len(stmt.value.params) == 0
+
+  def test_fn_type_parse(self):
+    source = """fn main() -> i64:
+    let f: Fn(i64, bool) -> i64 = |a: i64, b: bool| -> i64: a
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import FnType, LetStmt, SimpleType
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.type_ann, FnType)
+    assert len(stmt.type_ann.param_types) == 2
+    assert isinstance(stmt.type_ann.param_types[0], SimpleType)
+    assert stmt.type_ann.param_types[0].name == "i64"
 
 
 class TestChecker:
@@ -1249,6 +1303,53 @@ fn main() -> i64:
     ast = parse(tokens)
     check(ast)  # Should not raise - i64 is Copy
 
+  # === Closure type checking tests ===
+
+  def test_closure_type_valid(self):
+    source = """fn main() -> i64:
+    let add: Fn(i64, i64) -> i64 = |a: i64, b: i64| -> i64: a + b
+    return add(1, 2)
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_closure_type_mismatch_return(self):
+    source = """fn main() -> i64:
+    let f: Fn(i64) -> bool = |x: i64| -> i64: x * 2
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_closure_wrong_arg_count(self):
+    source = """fn main() -> i64:
+    let add: Fn(i64, i64) -> i64 = |a: i64, b: i64| -> i64: a + b
+    return add(1)
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="expects 2 arguments"):
+      check(ast)
+
+  def test_closure_wrong_arg_type(self):
+    source = """fn main() -> i64:
+    let f: Fn(i64) -> i64 = |x: i64| -> i64: x * 2
+    return f(true)
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="expects i64"):
+      check(ast)
+
 
 class TestCodegen:
   def test_generates_assembly(self):
@@ -1882,3 +1983,63 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 100  # 50 + 50
+
+  # === Closure tests ===
+
+  def test_closure_basic(self):
+    """Test basic closure definition and call."""
+    source = """fn main() -> i64:
+    let add: Fn(i64, i64) -> i64 = |a: i64, b: i64| -> i64: a + b
+    return add(3, 4)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 7
+
+  def test_closure_no_params(self):
+    """Test closure with no parameters."""
+    source = """fn main() -> i64:
+    let get_value: Fn() -> i64 = || -> i64: 42
+    return get_value()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_closure_single_param(self):
+    """Test closure with single parameter."""
+    source = """fn main() -> i64:
+    let double: Fn(i64) -> i64 = |x: i64| -> i64: x * 2
+    return double(21)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_closure_complex_body(self):
+    """Test closure with complex arithmetic in body."""
+    source = """fn main() -> i64:
+    let calc: Fn(i64, i64, i64) -> i64 = |a: i64, b: i64, c: i64| -> i64: a * b + c
+    return calc(5, 8, 2)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42  # 5 * 8 + 2 = 42
+
+  def test_closure_multiple_calls(self):
+    """Test calling a closure multiple times."""
+    source = """fn main() -> i64:
+    let add_ten: Fn(i64) -> i64 = |x: i64| -> i64: x + 10
+    let a: i64 = add_ten(5)
+    let b: i64 = add_ten(20)
+    return a + b
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 45  # 15 + 35
+
+  def test_closure_bool_return(self):
+    """Test closure returning bool."""
+    source = """fn main() -> i64:
+    let is_positive: Fn(i64) -> bool = |x: i64| -> bool: x > 0
+    if is_positive(5):
+        return 1
+    return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .ast import (
   Expr,
   Stmt,
+  FnType,
   IfStmt,
   ForStmt,
   LetStmt,
@@ -29,6 +30,7 @@ from .ast import (
   ReturnStmt,
   SimpleType,
   BoolLiteral,
+  ClosureExpr,
   EnumLiteral,
   ArrayLiteral,
   TupleLiteral,
@@ -37,6 +39,7 @@ from .ast import (
   MethodCallExpr,
   TupleIndexExpr,
   TypeAnnotation,
+  ClosureCallExpr,
   DerefAssignStmt,
   FieldAccessExpr,
   FieldAssignStmt,
@@ -72,6 +75,9 @@ def type_to_str(t: TypeAnnotation) -> str:
     case RefType(inner, mutable):
       prefix = "&mut " if mutable else "&"
       return f"{prefix}{type_to_str(inner)}"
+    case FnType(params, ret):
+      param_strs = ",".join(type_to_str(p) for p in params)
+      return f"Fn({param_strs})->{type_to_str(ret)}"
   raise TypeError(f"Unknown type annotation: {t}")
 
 
@@ -144,6 +150,38 @@ def get_ref_inner_type(type_str: str) -> str | None:
   elif type_str.startswith("&"):
     return type_str[1:]
   return None
+
+
+def is_fn_type(type_str: str) -> bool:
+  """Check if type string represents a function/closure type."""
+  return type_str.startswith("Fn(")
+
+
+def parse_fn_type(type_str: str) -> tuple[list[str], str] | None:
+  """Parse function type string like Fn(i64,i64)->i64 into (param_types, return_type)."""
+  if not is_fn_type(type_str):
+    return None
+  # Find the closing paren
+  paren_depth = 0
+  arrow_pos = -1
+  for i, c in enumerate(type_str):
+    if c == "(":
+      paren_depth += 1
+    elif c == ")":
+      paren_depth -= 1
+      if paren_depth == 0:
+        arrow_pos = i + 1
+        break
+  if arrow_pos == -1 or not type_str[arrow_pos:].startswith("->"):
+    return None
+  # Extract param types and return type
+  params_str = type_str[3 : arrow_pos - 1]  # Skip "Fn(" and ")"
+  return_type = type_str[arrow_pos + 2 :]  # Skip "->"
+  if not params_str:
+    return ([], return_type)
+  # Simple comma split (doesn't handle nested types with commas)
+  param_types = [p.strip() for p in params_str.split(",")]
+  return (param_types, return_type)
 
 
 @dataclass
@@ -340,6 +378,10 @@ class TypeChecker:
         inner_str = self._check_type_ann(inner)
         prefix = "&mut " if mutable else "&"
         return f"{prefix}{inner_str}"
+      case FnType(params, ret):
+        param_strs = [self._check_type_ann(p) for p in params]
+        ret_str = self._check_type_ann(ret)
+        return f"Fn({','.join(param_strs)})->{ret_str}"
     raise TypeError(f"Unknown type annotation: {t}")
 
   def check(self, program: Program) -> None:
@@ -759,6 +801,26 @@ class TypeChecker:
             raise TypeError(f"print() expects i64 or str, got {arg_type}")
           return "i64"
 
+        # Check if it's a closure variable being called
+        var_state = self._lookup_var_state(name)
+        if var_state is not None and is_fn_type(var_state.type_str):
+          # It's a closure call
+          self._check_not_moved(name)
+          parsed = parse_fn_type(var_state.type_str)
+          if parsed is None:
+            raise TypeError(f"Invalid function type '{var_state.type_str}'")
+          param_types, return_type = parsed
+
+          if len(args) != len(param_types):
+            raise TypeError(f"Closure '{name}' expects {len(param_types)} arguments, got {len(args)}")
+
+          for i, (arg, expected_type) in enumerate(zip(args, param_types)):
+            arg_type = self._check_expr(arg)
+            if arg_type != expected_type:
+              raise TypeError(f"Argument {i + 1} of closure '{name}' expects {expected_type}, got {arg_type}")
+
+          return return_type
+
         if name not in self.functions:
           raise TypeError(f"Undefined function '{name}'")
 
@@ -780,6 +842,50 @@ class TypeChecker:
                 pass
 
         return sig.return_type
+
+      case ClosureExpr(params, return_type, body):
+        # Type check a closure expression
+        # Create a new scope for the closure's parameters
+        self._enter_scope()
+
+        # Add parameters to scope
+        param_types: list[str] = []
+        for param in params:
+          param_type = self._check_type_ann(param.type_ann)
+          param_types.append(param_type)
+          self._define_var(param.name, param_type)
+
+        # Type check the body expression
+        ret_type = self._check_type_ann(return_type)
+        body_type = self._check_expr(body)
+        if body_type != ret_type:
+          raise TypeError(f"Closure body has type {body_type}, expected {ret_type}")
+
+        self._exit_scope()
+
+        # Return the function type
+        return f"Fn({','.join(param_types)})->{ret_type}"
+
+      case ClosureCallExpr(target, args):
+        # Call a closure expression (not a named variable)
+        target_type = self._check_expr(target)
+        if not is_fn_type(target_type):
+          raise TypeError(f"Cannot call non-function type '{target_type}'")
+
+        parsed = parse_fn_type(target_type)
+        if parsed is None:
+          raise TypeError(f"Invalid function type '{target_type}'")
+        param_types, return_type = parsed
+
+        if len(args) != len(param_types):
+          raise TypeError(f"Closure expects {len(param_types)} arguments, got {len(args)}")
+
+        for i, (arg, expected_type) in enumerate(zip(args, param_types)):
+          arg_type = self._check_expr(arg)
+          if arg_type != expected_type:
+            raise TypeError(f"Argument {i + 1} expects {expected_type}, got {arg_type}")
+
+        return return_type
 
       case RefExpr(target, mutable):
         # &x or &mut x - create a reference to the target

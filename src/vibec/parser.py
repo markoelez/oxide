@@ -3,6 +3,7 @@
 from .ast import (
   Expr,
   Stmt,
+  FnType,
   IfStmt,
   EnumDef,
   ForStmt,
@@ -32,6 +33,7 @@ from .ast import (
   ReturnStmt,
   SimpleType,
   BoolLiteral,
+  ClosureExpr,
   EnumLiteral,
   EnumVariant,
   StructField,
@@ -303,7 +305,7 @@ class Parser:
       self._expect(TokenType.RPAREN, "Expected ')'")
       return TupleType(tuple(element_types))
 
-    # Simple type or vec[T]
+    # Simple type or vec[T] or Fn(T1, T2) -> T
     token = self._expect(TokenType.IDENT, "Expected type name")
 
     # Check for vec[T]
@@ -312,6 +314,22 @@ class Parser:
       element_type = self._parse_type()
       self._expect(TokenType.RBRACKET, "Expected ']'")
       return VecType(element_type)
+
+    # Check for Fn(T1, T2) -> T (function/closure type)
+    if token.value == "Fn" and self._check(TokenType.LPAREN):
+      self._advance()
+      param_types: list[TypeAnnotation] = []
+      if not self._check(TokenType.RPAREN):
+        param_types.append(self._parse_type())
+        while self._check(TokenType.COMMA):
+          self._advance()
+          if self._check(TokenType.RPAREN):
+            break
+          param_types.append(self._parse_type())
+      self._expect(TokenType.RPAREN, "Expected ')' in Fn type")
+      self._expect(TokenType.ARROW, "Expected '->' in Fn type")
+      return_type = self._parse_type()
+      return FnType(tuple(param_types), return_type)
 
     return SimpleType(token.value)
 
@@ -552,6 +570,10 @@ class Parser:
       # Match expression
       return self._parse_match()
 
+    elif token.type == TokenType.PIPE:
+      # Closure expression: |a: i64, b: i64| -> i64: a + b
+      return self._parse_closure()
+
     elif token.type == TokenType.SELF:
       # Self reference in method
       self._advance()
@@ -615,7 +637,7 @@ class Parser:
       raise ParseError(f"Unexpected token '{token.value}'", token)
 
   def _parse_postfix(self, expr: Expr) -> Expr:
-    """Parse postfix operations: indexing [i], field access .field, tuple index .0, method calls .method()."""
+    """Parse postfix operations: indexing [i], field access .field, tuple index .0, method calls .method(), closure calls ()."""
     while True:
       if self._check(TokenType.LBRACKET):
         # Index expression: expr[index]
@@ -719,6 +741,32 @@ class Parser:
 
     self._expect(TokenType.DEDENT, "Expected dedent")
     return MatchExpr(target, tuple(arms))
+
+  def _parse_closure(self) -> ClosureExpr:
+    """Parse closure: |a: i64, b: i64| -> i64: expr."""
+    self._expect(TokenType.PIPE, "Expected '|'")
+
+    # Parse parameters
+    params: list[Parameter] = []
+    if not self._check(TokenType.PIPE):
+      params.append(self._parse_parameter())
+      while self._check(TokenType.COMMA):
+        self._advance()
+        if self._check(TokenType.PIPE):
+          break
+        params.append(self._parse_parameter())
+
+    self._expect(TokenType.PIPE, "Expected '|' after closure parameters")
+
+    # Parse return type
+    self._expect(TokenType.ARROW, "Expected '->' after closure parameters")
+    return_type = self._parse_type()
+
+    # Parse body (single expression after colon)
+    self._expect(TokenType.COLON, "Expected ':' before closure body")
+    body = self._parse_expression()
+
+    return ClosureExpr(tuple(params), return_type, body)
 
   def _parse_arguments(self) -> list[Expr]:
     """Parse comma-separated arguments."""

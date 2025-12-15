@@ -24,6 +24,7 @@ examples/tuples
 examples/enums
 examples/impl
 examples/references
+examples/closures
 
 # uv lock file
 uv.lock

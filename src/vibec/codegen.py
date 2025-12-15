@@ -3,6 +3,7 @@
 from .ast import (
   Expr,
   Stmt,
+  FnType,
   IfStmt,
   ForStmt,
   LetStmt,
@@ -19,6 +20,7 @@ from .ast import (
   DerefExpr,
   IndexExpr,
   MatchExpr,
+  Parameter,
   TupleType,
   UnaryExpr,
   WhileStmt,
@@ -28,6 +30,7 @@ from .ast import (
   ReturnStmt,
   SimpleType,
   BoolLiteral,
+  ClosureExpr,
   EnumLiteral,
   ArrayLiteral,
   TupleLiteral,
@@ -36,6 +39,7 @@ from .ast import (
   MethodCallExpr,
   TupleIndexExpr,
   TypeAnnotation,
+  ClosureCallExpr,
   DerefAssignStmt,
   FieldAccessExpr,
   FieldAssignStmt,
@@ -57,6 +61,9 @@ def type_to_str(t: TypeAnnotation) -> str:
     case RefType(inner, mutable):
       prefix = "&mut " if mutable else "&"
       return f"{prefix}{type_to_str(inner)}"
+    case FnType(params, ret):
+      param_strs = ",".join(type_to_str(p) for p in params)
+      return f"Fn({param_strs})->{type_to_str(ret)}"
   return "unknown"
 
 
@@ -128,6 +135,9 @@ class CodeGenerator:
     self.enums: dict[str, dict[str, tuple[int, bool]]] = {}
     # Struct methods: struct_name -> method_name -> mangled_function_name
     self.struct_methods: dict[str, dict[str, str]] = {}
+    # Closures: list of (label, params, return_type, body) to generate at end
+    self.closures: list[tuple[str, tuple[Parameter, ...], TypeAnnotation, Expr]] = []
+    self.closure_counter = 0
 
   def _emit(self, line: str) -> None:
     self.output.append(line)
@@ -247,6 +257,12 @@ class CodeGenerator:
         self._collect_strings_from_expr(target)
       case DerefExpr(target):
         self._collect_strings_from_expr(target)
+      case ClosureExpr(_, _, body):
+        self._collect_strings_from_expr(body)
+      case ClosureCallExpr(target, args):
+        self._collect_strings_from_expr(target)
+        for arg in args:
+          self._collect_strings_from_expr(arg)
       case _:
         pass
 
@@ -307,7 +323,56 @@ class CodeGenerator:
     for func in program.functions:
       self._gen_function(func)
 
+    # Generate closure functions (collected during code generation)
+    for label, params, return_type, body in self.closures:
+      self._gen_closure_function(label, params, return_type, body)
+
     return "\n".join(self.output)
+
+  def _gen_closure_function(self, label: str, params: tuple[Parameter, ...], return_type: TypeAnnotation, body: Expr) -> None:
+    """Generate a closure as a standalone function."""
+    # Save current state
+    old_locals = self.locals
+    old_next_slot = self.next_slot
+    old_func_name = self.current_func_name
+
+    self.locals = {}
+    self.next_slot = 0
+    self.current_func_name = label
+
+    # Calculate frame size: params + some space for temps
+    frame_size = max(48, (32 + len(params) * 8 + 15) & ~15)
+    self.frame_size = frame_size
+
+    # Emit function prologue
+    self._emit(f"{label}:")
+    self._emit(f"    sub sp, sp, #{frame_size}")
+    self._emit(f"    stp x29, x30, [sp, #{frame_size - 16}]")
+    self._emit(f"    add x29, sp, #{frame_size - 16}")
+
+    # Store parameters
+    for i, param in enumerate(params):
+      offset = -16 - (self.next_slot * 8)
+      type_str = type_to_str(param.type_ann)
+      self.locals[param.name] = (offset, type_str)
+      if i < 8:
+        self._emit(f"    str x{i}, [x29, #{offset}]")
+      self.next_slot += 1
+
+    # Generate body expression
+    self._gen_expr(body)
+
+    # Epilogue - result is in x0
+    self._emit(f"{label}_epilogue:")
+    self._emit(f"    ldp x29, x30, [sp, #{frame_size - 16}]")
+    self._emit(f"    add sp, sp, #{frame_size}")
+    self._emit("    ret")
+    self._emit("")
+
+    # Restore state
+    self.locals = old_locals
+    self.next_slot = old_next_slot
+    self.current_func_name = old_func_name
 
   def _count_locals(self, stmts: tuple[Stmt, ...]) -> int:
     """Count local variable slots needed (arrays need multiple slots)."""
@@ -772,6 +837,9 @@ class CodeGenerator:
       case CallExpr(name, args):
         if name == "print":
           self._gen_print(args)
+        elif name in self.locals:
+          # Closure call - variable holds a function pointer
+          self._gen_closure_call(name, args)
         else:
           self._gen_call(name, args)
 
@@ -906,6 +974,31 @@ class CodeGenerator:
         self._gen_expr(target)  # Get address into x0
         self._emit("    ldr x0, [x0]")  # Load value at that address
 
+      case ClosureExpr(params, return_type, body):
+        # Generate a closure: create a function and return its address
+        label = f"_closure{self.closure_counter}"
+        self.closure_counter += 1
+        # Store closure info for later generation
+        self.closures.append((label, params, return_type, body))
+        # Return address of the closure function
+        self._emit(f"    adrp x0, {label}@PAGE")
+        self._emit(f"    add x0, x0, {label}@PAGEOFF")
+
+      case ClosureCallExpr(target, args):
+        # Call a closure expression result
+        # First, push all args to stack
+        for i, arg in enumerate(reversed(args)):
+          self._gen_expr(arg)
+          self._emit("    str x0, [sp, #-16]!")
+        # Evaluate target to get function pointer
+        self._gen_expr(target)
+        self._emit("    mov x9, x0")  # Function pointer in x9
+        # Pop args into registers x0-x7
+        for i in range(len(args)):
+          self._emit(f"    ldr x{i}, [sp], #16")
+        # Call through function pointer
+        self._emit("    blr x9")
+
   def _gen_print(self, args: tuple[Expr, ...]) -> None:
     """Generate code for print() builtin.
 
@@ -989,6 +1082,24 @@ class CodeGenerator:
 
     # Call function
     self._emit(f"    bl _{name}")
+
+  def _gen_closure_call(self, name: str, args: tuple[Expr, ...]) -> None:
+    """Generate code for calling a closure stored in a variable."""
+    # Push args to stack in reverse order
+    for arg in reversed(args):
+      self._gen_expr(arg)
+      self._emit("    str x0, [sp, #-16]!")
+
+    # Load function pointer from variable
+    offset, _ = self.locals[name]
+    self._emit(f"    ldr x9, [x29, #{offset}]")
+
+    # Pop args into registers
+    for i in range(len(args)):
+      self._emit(f"    ldr x{i}, [sp], #16")
+
+    # Call through function pointer
+    self._emit("    blr x9")
 
   def _gen_method_call(self, target: Expr, method: str, args: tuple[Expr, ...]) -> None:
     """Generate code for method calls on lists/arrays."""

@@ -42,8 +42,16 @@ class RefType:
   mutable: bool
 
 
+@dataclass(frozen=True, slots=True)
+class FnType:
+  """Function/closure type: Fn(i64, i64) -> i64."""
+
+  param_types: tuple["TypeAnnotation", ...]
+  return_type: "TypeAnnotation"
+
+
 # Type annotation union
-TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType
+TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType | FnType
 
 
 # === Expressions ===
@@ -199,6 +207,23 @@ class DerefExpr:
   target: "Expr"
 
 
+@dataclass(frozen=True, slots=True)
+class ClosureExpr:
+  """Closure expression: |a: i64, b: i64| -> i64: a + b."""
+
+  params: tuple["Parameter", ...]
+  return_type: "TypeAnnotation"
+  body: "Expr"
+
+
+@dataclass(frozen=True, slots=True)
+class ClosureCallExpr:
+  """Call a closure: closure_var(arg1, arg2)."""
+
+  target: "Expr"
+  args: tuple["Expr", ...]
+
+
 # Expression union type
 Expr = (
   IntLiteral
@@ -219,6 +244,8 @@ Expr = (
   | MatchExpr
   | RefExpr
   | DerefExpr
+  | ClosureExpr
+  | ClosureCallExpr
 )
 
 

@@ -53,6 +53,7 @@ class TokenType(Enum):
   SLASH = auto()
   PERCENT = auto()
   AMP = auto()  # & for references
+  PIPE = auto()  # | for closures
 
   # Comparison
   EQ = auto()

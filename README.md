@@ -49,7 +49,6 @@ fn main() -> i64:
 - Cannot use values after they've been moved
 - Cannot move values inside loops
 
-**Supported:** ownership & borrowing, enums with `match`, functions, structs with `impl` methods, tuples, arrays, vectors, `if`/`else`, `while`, `for i in range()`, references `&T`/`&mut T`
 
 ## Architecture
 

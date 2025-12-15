@@ -8,18 +8,50 @@ from .ast import (
   LetStmt,
   Program,
   VarExpr,
+  VecType,
   CallExpr,
   ExprStmt,
   Function,
+  ArrayType,
+  IndexExpr,
   UnaryExpr,
   WhileStmt,
   AssignStmt,
   BinaryExpr,
   IntLiteral,
   ReturnStmt,
+  SimpleType,
   BoolLiteral,
+  ArrayLiteral,
   StringLiteral,
+  MethodCallExpr,
+  TypeAnnotation,
+  IndexAssignStmt,
 )
+
+
+def type_to_str(t: TypeAnnotation) -> str:
+  """Convert type annotation to string."""
+  match t:
+    case SimpleType(name):
+      return name
+    case ArrayType(elem, size):
+      return f"[{type_to_str(elem)};{size}]"
+    case VecType(elem):
+      return f"vec[{type_to_str(elem)}]"
+  return "unknown"
+
+
+def get_array_size(type_str: str) -> int | None:
+  """Extract size from array type string like [i64;5]."""
+  if type_str.startswith("[") and ";" in type_str:
+    return int(type_str[type_str.index(";") + 1 : -1])
+  return None
+
+
+def is_vec_type(type_str: str) -> bool:
+  """Check if type is a vec."""
+  return type_str.startswith("vec[")
 
 
 class CodeGenerator:
@@ -95,6 +127,10 @@ class CodeGenerator:
           self._collect_strings_from_expr(value)
         case AssignStmt(_, value):
           self._collect_strings_from_expr(value)
+        case IndexAssignStmt(target, index, value):
+          self._collect_strings_from_expr(target)
+          self._collect_strings_from_expr(index)
+          self._collect_strings_from_expr(value)
         case ReturnStmt(value):
           self._collect_strings_from_expr(value)
         case ExprStmt(expr):
@@ -123,6 +159,16 @@ class CodeGenerator:
       case UnaryExpr(_, operand):
         self._collect_strings_from_expr(operand)
       case CallExpr(_, args):
+        for arg in args:
+          self._collect_strings_from_expr(arg)
+      case ArrayLiteral(elements):
+        for elem in elements:
+          self._collect_strings_from_expr(elem)
+      case IndexExpr(target, index):
+        self._collect_strings_from_expr(target)
+        self._collect_strings_from_expr(index)
+      case MethodCallExpr(target, _, args):
+        self._collect_strings_from_expr(target)
         for arg in args:
           self._collect_strings_from_expr(arg)
       case _:
@@ -157,12 +203,12 @@ class CodeGenerator:
     return "\n".join(self.output)
 
   def _count_locals(self, stmts: tuple[Stmt, ...]) -> int:
-    """Count local variables in a statement list (including nested blocks)."""
+    """Count local variable slots needed (arrays need multiple slots)."""
     count = 0
     for stmt in stmts:
       match stmt:
-        case LetStmt():
-          count += 1
+        case LetStmt(_, type_ann, _):
+          count += self._slots_for_type(type_ann)
         case IfStmt(_, then_body, else_body):
           count += self._count_locals(then_body)
           if else_body:
@@ -173,6 +219,16 @@ class CodeGenerator:
           count += 2  # Loop variable + end value temp
           count += self._count_locals(body)
     return count
+
+  def _slots_for_type(self, t: TypeAnnotation) -> int:
+    """Return number of 8-byte slots needed for a type."""
+    match t:
+      case ArrayType(_, size):
+        return size  # Each element is 8 bytes
+      case VecType(_):
+        return 1  # List is a pointer
+      case _:
+        return 1  # Simple types are 8 bytes
 
   def _gen_function(self, func: Function) -> None:
     """Generate assembly for a function."""
@@ -205,10 +261,11 @@ class CodeGenerator:
     # Parameters go at [x29 - 16], [x29 - 24], etc.
     for i, param in enumerate(func.params):
       offset = -16 - (self.next_slot * 8)
-      self.locals[param.name] = (offset, param.type_ann.name)
+      type_str = type_to_str(param.type_ann)
+      self.locals[param.name] = (offset, type_str)
       if i < 8:
         self._emit(f"    str x{i}, [x29, #{offset}]")
-      self.next_slot += 1
+      self.next_slot += self._slots_for_type(param.type_ann)
 
     # Generate body
     for stmt in func.body:
@@ -225,14 +282,44 @@ class CodeGenerator:
     """Generate assembly for a statement."""
     match stmt:
       case LetStmt(name, type_ann, value):
-        # Evaluate value to x0
-        self._gen_expr(value)
-        # Allocate slot
+        type_str = type_to_str(type_ann)
         offset = -16 - (self.next_slot * 8)
-        self.locals[name] = (offset, type_ann.name)
-        self.next_slot += 1
-        # Store value
-        self._emit(f"    str x0, [x29, #{offset}]")
+        self.locals[name] = (offset, type_str)
+        slots_needed = self._slots_for_type(type_ann)
+
+        match type_ann:
+          case ArrayType(_, size):
+            # Array: initialize elements in place
+            match value:
+              case ArrayLiteral(elements):
+                for i, elem in enumerate(elements):
+                  self._gen_expr(elem)
+                  self._emit(f"    str x0, [x29, #{offset - i * 8}]")
+                # Zero-fill remaining slots if literal is smaller
+                for i in range(len(elements), size):
+                  self._emit(f"    str xzr, [x29, #{offset - i * 8}]")
+              case _:
+                # Initialize all to zero
+                for i in range(size):
+                  self._emit(f"    str xzr, [x29, #{offset - i * 8}]")
+            self.next_slot += slots_needed
+
+          case VecType(_):
+            # List: allocate initial buffer (16 elements * 8 bytes + 16 header)
+            # Header: [capacity, length] at base, data follows
+            self._emit("    mov x0, #144")  # 16 + 16*8 = 144 bytes
+            self._emit("    bl _malloc")
+            self._emit("    mov x1, #16")  # Initial capacity
+            self._emit("    str x1, [x0]")  # Store capacity
+            self._emit("    str xzr, [x0, #8]")  # Length = 0
+            self._emit(f"    str x0, [x29, #{offset}]")
+            self.next_slot += 1
+
+          case _:
+            # Simple type: evaluate and store
+            self._gen_expr(value)
+            self._emit(f"    str x0, [x29, #{offset}]")
+            self.next_slot += 1
 
       case AssignStmt(name, value):
         # Evaluate value to x0
@@ -240,6 +327,32 @@ class CodeGenerator:
         # Store to existing variable slot
         offset, _ = self.locals[name]
         self._emit(f"    str x0, [x29, #{offset}]")
+
+      case IndexAssignStmt(target, index, value):
+        # Get target address
+        match target:
+          case VarExpr(name):
+            offset, type_str = self.locals[name]
+            # Evaluate index
+            self._gen_expr(index)
+            self._emit("    str x0, [sp, #-16]!")  # Save index
+
+            # Evaluate value
+            self._gen_expr(value)
+            self._emit("    mov x2, x0")  # Value in x2
+
+            self._emit("    ldr x1, [sp], #16")  # Restore index to x1
+
+            if is_vec_type(type_str):
+              # List: load base pointer, access data[index]
+              self._emit(f"    ldr x0, [x29, #{offset}]")  # Base pointer
+              self._emit("    add x0, x0, #16")  # Skip header
+              self._emit("    str x2, [x0, x1, lsl #3]")
+            else:
+              # Array: direct stack access
+              self._emit(f"    add x0, x29, #{offset}")
+              self._emit("    neg x1, x1")  # Negate for downward growth
+              self._emit("    str x2, [x0, x1, lsl #3]")
 
       case ReturnStmt(value):
         # Evaluate return value to x0
@@ -421,6 +534,42 @@ class CodeGenerator:
         else:
           self._gen_call(name, args)
 
+      case ArrayLiteral(elements):
+        # Array literal outside of let: shouldn't happen after type checking
+        # But we can handle it by returning address of first element
+        if elements:
+          self._gen_expr(elements[0])
+
+      case IndexExpr(target, index):
+        match target:
+          case VarExpr(name):
+            offset, type_str = self.locals[name]
+            # Evaluate index
+            self._gen_expr(index)
+            self._emit("    mov x1, x0")  # Index in x1
+
+            if is_vec_type(type_str):
+              # List: load base pointer, access data[index]
+              self._emit(f"    ldr x0, [x29, #{offset}]")  # Base pointer
+              self._emit("    add x0, x0, #16")  # Skip header
+              self._emit("    ldr x0, [x0, x1, lsl #3]")
+            else:
+              # Array: direct stack access
+              self._emit(f"    add x0, x29, #{offset}")
+              self._emit("    neg x1, x1")  # Negate for downward growth
+              self._emit("    ldr x0, [x0, x1, lsl #3]")
+          case _:
+            # Handle nested index expressions
+            self._gen_expr(target)
+            self._emit("    str x0, [sp, #-16]!")  # Save target address
+            self._gen_expr(index)
+            self._emit("    mov x1, x0")  # Index in x1
+            self._emit("    ldr x0, [sp], #16")  # Restore target
+            self._emit("    ldr x0, [x0, x1, lsl #3]")
+
+      case MethodCallExpr(target, method, args):
+        self._gen_method_call(target, method, args)
+
   def _gen_print(self, args: tuple[Expr, ...]) -> None:
     """Generate code for print() builtin.
 
@@ -472,6 +621,120 @@ class CodeGenerator:
 
     # Call function
     self._emit(f"    bl _{name}")
+
+  def _gen_method_call(self, target: Expr, method: str, args: tuple[Expr, ...]) -> None:
+    """Generate code for method calls on lists/arrays."""
+    match target:
+      case VarExpr(name):
+        offset, type_str = self.locals[name]
+
+        if is_vec_type(type_str):
+          match method:
+            case "push":
+              # push(value): list.data[list.len++] = value
+              # First check if we need to grow
+              grow_label = self._new_label("grow")
+              done_label = self._new_label("push_done")
+
+              self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
+              self._emit("    ldr x10, [x9]")  # Capacity
+              self._emit("    ldr x11, [x9, #8]")  # Length
+
+              # Check if len >= capacity
+              self._emit("    cmp x11, x10")
+              self._emit(f"    b.ge {grow_label}")
+
+              # Store the value
+              self._gen_expr(args[0])
+              self._emit("    mov x12, x0")  # Value in x12
+              self._emit(f"    ldr x9, [x29, #{offset}]")  # Reload base
+              self._emit("    ldr x11, [x9, #8]")  # Length
+              self._emit("    add x13, x9, #16")  # Data start
+              self._emit("    str x12, [x13, x11, lsl #3]")
+
+              # Increment length
+              self._emit("    add x11, x11, #1")
+              self._emit("    str x11, [x9, #8]")
+              self._emit("    mov x0, #0")  # Return 0
+              self._emit(f"    b {done_label}")
+
+              # Grow the list (double capacity)
+              self._emit(f"{grow_label}:")
+              self._emit(f"    ldr x9, [x29, #{offset}]")
+              self._emit("    ldr x10, [x9]")  # Old capacity
+              self._emit("    lsl x10, x10, #1")  # Double it
+              self._emit("    add x0, x10, #2")  # new_cap + 2 (header)
+              self._emit("    lsl x0, x0, #3")  # * 8 bytes
+              self._emit("    bl _malloc")  # New buffer in x0
+
+              # Copy header and data
+              self._emit(f"    ldr x9, [x29, #{offset}]")  # Old base
+              self._emit("    ldr x1, [x9]")  # Old capacity
+              self._emit("    lsl x1, x1, #1")  # New capacity
+              self._emit("    str x1, [x0]")  # Store new capacity
+              self._emit("    ldr x2, [x9, #8]")  # Length
+              self._emit("    str x2, [x0, #8]")  # Copy length
+
+              # Copy data elements
+              copy_loop = self._new_label("copy")
+              copy_done = self._new_label("copy_done")
+              self._emit("    mov x3, #0")  # Counter
+              self._emit(f"{copy_loop}:")
+              self._emit("    cmp x3, x2")
+              self._emit(f"    b.ge {copy_done}")
+              self._emit("    add x4, x9, #16")  # Old data
+              self._emit("    ldr x5, [x4, x3, lsl #3]")
+              self._emit("    add x4, x0, #16")  # New data
+              self._emit("    str x5, [x4, x3, lsl #3]")
+              self._emit("    add x3, x3, #1")
+              self._emit(f"    b {copy_loop}")
+              self._emit(f"{copy_done}:")
+
+              # Free old buffer
+              self._emit("    str x0, [sp, #-16]!")  # Save new pointer
+              self._emit("    mov x0, x9")
+              self._emit("    bl _free")
+              self._emit("    ldr x9, [sp], #16")  # Restore new pointer
+
+              # Update local variable
+              self._emit(f"    str x9, [x29, #{offset}]")
+
+              # Now do the push on new buffer
+              self._emit("    ldr x11, [x9, #8]")  # Length
+              self._gen_expr(args[0])
+              self._emit("    mov x12, x0")
+              self._emit(f"    ldr x9, [x29, #{offset}]")
+              self._emit("    ldr x11, [x9, #8]")
+              self._emit("    add x13, x9, #16")
+              self._emit("    str x12, [x13, x11, lsl #3]")
+              self._emit("    add x11, x11, #1")
+              self._emit("    str x11, [x9, #8]")
+              self._emit("    mov x0, #0")
+
+              self._emit(f"{done_label}:")
+
+            case "pop":
+              # pop(): return list.data[--list.len]
+              self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
+              self._emit("    ldr x10, [x9, #8]")  # Length
+              self._emit("    sub x10, x10, #1")  # Decrement
+              self._emit("    str x10, [x9, #8]")  # Store new length
+              self._emit("    add x9, x9, #16")  # Data start
+              self._emit("    ldr x0, [x9, x10, lsl #3]")  # Return value
+
+            case "len":
+              # len(): return list.len
+              self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
+              self._emit("    ldr x0, [x9, #8]")  # Length
+
+        else:
+          # Array methods
+          match method:
+            case "len":
+              # Array length is compile-time constant
+              size = get_array_size(type_str)
+              if size is not None:
+                self._emit(f"    mov x0, #{size}")
 
 
 def generate(program: Program) -> str:

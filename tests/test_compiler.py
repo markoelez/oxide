@@ -205,6 +205,61 @@ class TestParser:
     assert isinstance(stmt.start, IntLiteral)
     assert stmt.start.value == 2
 
+  def test_array_type(self):
+    source = """fn main() -> i64:
+    let arr: [i64; 3] = [1, 2, 3]
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import LetStmt, ArrayType
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.type_ann, ArrayType)
+    assert stmt.type_ann.size == 3
+
+  def test_vec_type(self):
+    source = """fn main() -> i64:
+    let nums: vec[i64] = []
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import LetStmt, VecType
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.type_ann, VecType)
+
+  def test_index_expr(self):
+    source = """fn main() -> i64:
+    let arr: [i64; 3] = [1, 2, 3]
+    return arr[0]
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import IndexExpr, ReturnStmt
+
+    stmt = ast.functions[0].body[1]
+    assert isinstance(stmt, ReturnStmt)
+    assert isinstance(stmt.value, IndexExpr)
+
+  def test_method_call(self):
+    source = """fn main() -> i64:
+    let nums: vec[i64] = []
+    nums.push(1)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import ExprStmt, MethodCallExpr
+
+    stmt = ast.functions[0].body[1]
+    assert isinstance(stmt, ExprStmt)
+    assert isinstance(stmt.expr, MethodCallExpr)
+    assert stmt.expr.method == "push"
+
 
 class TestChecker:
   def test_type_mismatch(self):
@@ -526,3 +581,84 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 12  # 3 * 4 = 12
+
+  def test_array_literal_and_access(self):
+    source = """fn main() -> i64:
+    let arr: [i64; 3] = [10, 20, 30]
+    return arr[1]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 20
+
+  def test_array_assignment(self):
+    source = """fn main() -> i64:
+    let arr: [i64; 3] = [1, 2, 3]
+    arr[0] = 100
+    return arr[0]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100
+
+  def test_array_sum(self):
+    source = """fn main() -> i64:
+    let arr: [i64; 5] = [1, 2, 3, 4, 5]
+    let sum: i64 = 0
+    for i in range(5):
+        sum = sum + arr[i]
+    return sum
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 15
+
+  def test_array_len(self):
+    source = """fn main() -> i64:
+    let arr: [i64; 7] = [0, 0, 0, 0, 0, 0, 0]
+    return arr.len()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 7
+
+  def test_vec_push_and_access(self):
+    source = """fn main() -> i64:
+    let nums: vec[i64] = []
+    nums.push(10)
+    nums.push(20)
+    nums.push(30)
+    return nums[1]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 20
+
+  def test_vec_len(self):
+    source = """fn main() -> i64:
+    let nums: vec[i64] = []
+    nums.push(1)
+    nums.push(2)
+    nums.push(3)
+    return nums.len()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 3
+
+  def test_vec_pop(self):
+    source = """fn main() -> i64:
+    let nums: vec[i64] = []
+    nums.push(5)
+    nums.push(10)
+    nums.push(15)
+    let last: i64 = nums.pop()
+    return last
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 15
+
+  def test_vec_index_assign(self):
+    source = """fn main() -> i64:
+    let nums: vec[i64] = []
+    nums.push(1)
+    nums.push(2)
+    nums[0] = 100
+    return nums[0]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100

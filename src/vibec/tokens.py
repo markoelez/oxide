@@ -31,7 +31,11 @@ class TokenType(Enum):
   ARROW = auto()
   LPAREN = auto()
   RPAREN = auto()
+  LBRACKET = auto()
+  RBRACKET = auto()
   COMMA = auto()
+  SEMICOLON = auto()
+  DOT = auto()
 
   # Operators
   PLUS = auto()

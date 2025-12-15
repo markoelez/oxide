@@ -8,9 +8,12 @@ from .ast import (
   LetStmt,
   Program,
   VarExpr,
+  VecType,
   CallExpr,
   ExprStmt,
   Function,
+  ArrayType,
+  IndexExpr,
   Parameter,
   UnaryExpr,
   WhileStmt,
@@ -18,9 +21,13 @@ from .ast import (
   BinaryExpr,
   IntLiteral,
   ReturnStmt,
+  SimpleType,
   BoolLiteral,
+  ArrayLiteral,
   StringLiteral,
+  MethodCallExpr,
   TypeAnnotation,
+  IndexAssignStmt,
 )
 from .tokens import Token, TokenType
 
@@ -161,9 +168,27 @@ class Parser:
     return Parameter(name_token.value, type_ann)
 
   def _parse_type(self) -> TypeAnnotation:
-    """Parse a type annotation."""
+    """Parse a type annotation: simple, [T; N], or vec[T]."""
+    # Array type: [T; N]
+    if self._check(TokenType.LBRACKET):
+      self._advance()
+      element_type = self._parse_type()
+      self._expect(TokenType.SEMICOLON, "Expected ';' in array type")
+      size_token = self._expect(TokenType.INT, "Expected array size")
+      self._expect(TokenType.RBRACKET, "Expected ']'")
+      return ArrayType(element_type, int(size_token.value))
+
+    # Simple type or vec[T]
     token = self._expect(TokenType.IDENT, "Expected type name")
-    return TypeAnnotation(token.value)
+
+    # Check for vec[T]
+    if token.value == "vec" and self._check(TokenType.LBRACKET):
+      self._advance()
+      element_type = self._parse_type()
+      self._expect(TokenType.RBRACKET, "Expected ']'")
+      return VecType(element_type)
+
+    return SimpleType(token.value)
 
   def _parse_block(self) -> list[Stmt]:
     """Parse: INDENT stmt* DEDENT"""
@@ -191,10 +216,28 @@ class Parser:
       return self._parse_while()
     elif self._check(TokenType.FOR):
       return self._parse_for()
-    elif self._check(TokenType.IDENT) and self._peek().type == TokenType.ASSIGN:
-      return self._parse_assign()
+    elif self._check(TokenType.IDENT):
+      # Could be: assignment, index assignment, or expression statement
+      # Look ahead to determine which
+      if self._peek().type == TokenType.ASSIGN:
+        return self._parse_assign()
+      elif self._peek().type == TokenType.LBRACKET:
+        return self._parse_index_assign_or_expr()
+      else:
+        return self._parse_expr_stmt()
     else:
       return self._parse_expr_stmt()
+
+  def _parse_index_assign_or_expr(self) -> Stmt:
+    """Parse index assignment (arr[i] = x) or expression statement."""
+    expr = self._parse_expression()
+    if self._check(TokenType.ASSIGN) and isinstance(expr, IndexExpr):
+      self._advance()  # consume '='
+      value = self._parse_expression()
+      self._expect(TokenType.NEWLINE, "Expected newline after assignment")
+      return IndexAssignStmt(expr.target, expr.index, value)
+    self._expect(TokenType.NEWLINE, "Expected newline after expression")
+    return ExprStmt(expr)
 
   def _parse_assign(self) -> AssignStmt:
     """Parse: name = expr"""
@@ -337,6 +380,10 @@ class Parser:
       self._advance()
       return StringLiteral(token.value)
 
+    elif token.type == TokenType.LBRACKET:
+      # Array literal: [1, 2, 3]
+      return self._parse_array_literal()
+
     elif token.type == TokenType.IDENT:
       name = token.value
       self._advance()
@@ -346,18 +393,58 @@ class Parser:
         self._advance()
         args = self._parse_arguments()
         self._expect(TokenType.RPAREN, "Expected ')'")
-        return CallExpr(name, tuple(args))
+        expr: Expr = CallExpr(name, tuple(args))
+      else:
+        expr = VarExpr(name)
 
-      return VarExpr(name)
+      # Handle postfix operations: indexing and method calls
+      return self._parse_postfix(expr)
 
     elif token.type == TokenType.LPAREN:
       self._advance()
       expr = self._parse_expression()
       self._expect(TokenType.RPAREN, "Expected ')'")
-      return expr
+      return self._parse_postfix(expr)
 
     else:
       raise ParseError(f"Unexpected token '{token.value}'", token)
+
+  def _parse_postfix(self, expr: Expr) -> Expr:
+    """Parse postfix operations: indexing [i] and method calls .method()."""
+    while True:
+      if self._check(TokenType.LBRACKET):
+        # Index expression: expr[index]
+        self._advance()
+        index = self._parse_expression()
+        self._expect(TokenType.RBRACKET, "Expected ']'")
+        expr = IndexExpr(expr, index)
+      elif self._check(TokenType.DOT):
+        # Method call: expr.method(args)
+        self._advance()
+        method_token = self._expect(TokenType.IDENT, "Expected method name")
+        self._expect(TokenType.LPAREN, "Expected '('")
+        args = self._parse_arguments()
+        self._expect(TokenType.RPAREN, "Expected ')'")
+        expr = MethodCallExpr(expr, method_token.value, tuple(args))
+      else:
+        break
+    return expr
+
+  def _parse_array_literal(self) -> ArrayLiteral:
+    """Parse array literal: [expr, expr, ...]."""
+    self._expect(TokenType.LBRACKET, "Expected '['")
+    elements: list[Expr] = []
+
+    if not self._check(TokenType.RBRACKET):
+      elements.append(self._parse_expression())
+      while self._check(TokenType.COMMA):
+        self._advance()
+        if self._check(TokenType.RBRACKET):
+          break  # Allow trailing comma
+        elements.append(self._parse_expression())
+
+    self._expect(TokenType.RBRACKET, "Expected ']'")
+    return ArrayLiteral(tuple(elements))
 
   def _parse_arguments(self) -> list[Expr]:
     """Parse comma-separated arguments."""

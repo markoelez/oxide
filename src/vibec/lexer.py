@@ -6,8 +6,12 @@ from .tokens import KEYWORDS, Token, TokenType
 SIMPLE_TOKENS: dict[str, TokenType] = {
   "(": TokenType.LPAREN,
   ")": TokenType.RPAREN,
+  "[": TokenType.LBRACKET,
+  "]": TokenType.RBRACKET,
   ":": TokenType.COLON,
   ",": TokenType.COMMA,
+  ";": TokenType.SEMICOLON,
+  ".": TokenType.DOT,
   "+": TokenType.PLUS,
   "*": TokenType.STAR,
   "/": TokenType.SLASH,

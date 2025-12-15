@@ -10,17 +10,25 @@ from .ast import (
   LetStmt,
   Program,
   VarExpr,
+  VecType,
   CallExpr,
   ExprStmt,
   Function,
+  ArrayType,
+  IndexExpr,
   UnaryExpr,
   WhileStmt,
   AssignStmt,
   BinaryExpr,
   IntLiteral,
   ReturnStmt,
+  SimpleType,
   BoolLiteral,
+  ArrayLiteral,
   StringLiteral,
+  MethodCallExpr,
+  TypeAnnotation,
+  IndexAssignStmt,
 )
 
 
@@ -36,6 +44,39 @@ class FunctionSignature:
 
   param_types: tuple[str, ...]
   return_type: str
+
+
+def type_to_str(t: TypeAnnotation) -> str:
+  """Convert a type annotation to a canonical string representation."""
+  match t:
+    case SimpleType(name):
+      return name
+    case ArrayType(elem, size):
+      return f"[{type_to_str(elem)};{size}]"
+    case VecType(elem):
+      return f"vec[{type_to_str(elem)}]"
+  raise TypeError(f"Unknown type annotation: {t}")
+
+
+def get_element_type(type_str: str) -> str | None:
+  """Extract element type from array or vec type string."""
+  if type_str.startswith("[") and ";" in type_str:
+    # Array type: [i64;5] -> i64
+    return type_str[1 : type_str.index(";")]
+  elif type_str.startswith("vec["):
+    # Vec type: vec[i64] -> i64
+    return type_str[4:-1]
+  return None
+
+
+def is_array_type(type_str: str) -> bool:
+  """Check if type string represents an array."""
+  return type_str.startswith("[") and ";" in type_str
+
+
+def is_vec_type(type_str: str) -> bool:
+  """Check if type string represents a vec."""
+  return type_str.startswith("vec[")
 
 
 class TypeChecker:
@@ -71,25 +112,36 @@ class TypeChecker:
         return scope[name]
     raise TypeError(f"Undefined variable '{name}'")
 
-  def _check_type(self, name: str) -> None:
-    """Verify that a type name is valid."""
-    if name not in ("i64", "bool", "str"):
-      raise TypeError(f"Unknown type '{name}'")
+  def _check_type_ann(self, t: TypeAnnotation) -> str:
+    """Verify type annotation is valid and return canonical string."""
+    match t:
+      case SimpleType(name):
+        if name not in ("i64", "bool", "str"):
+          raise TypeError(f"Unknown type '{name}'")
+        return name
+      case ArrayType(elem, size):
+        if size <= 0:
+          raise TypeError("Array size must be positive")
+        elem_str = self._check_type_ann(elem)
+        return f"[{elem_str};{size}]"
+      case VecType(elem):
+        elem_str = self._check_type_ann(elem)
+        return f"vec[{elem_str}]"
+    raise TypeError(f"Unknown type annotation: {t}")
 
   def check(self, program: Program) -> None:
     """Type check an entire program."""
     # First pass: register all function signatures
     for func in program.functions:
-      self._check_type(func.return_type.name)
+      ret_type = self._check_type_ann(func.return_type)
       param_types: list[str] = []
       for param in func.params:
-        self._check_type(param.type_ann.name)
-        param_types.append(param.type_ann.name)
+        param_types.append(self._check_type_ann(param.type_ann))
 
       if func.name in self.functions:
         raise TypeError(f"Function '{func.name}' already defined")
 
-      self.functions[func.name] = FunctionSignature(tuple(param_types), func.return_type.name)
+      self.functions[func.name] = FunctionSignature(tuple(param_types), ret_type)
 
     # Check for main function
     if "main" not in self.functions:
@@ -102,11 +154,11 @@ class TypeChecker:
   def _check_function(self, func: Function) -> None:
     """Type check a function body."""
     self._enter_scope()
-    self.current_return_type = func.return_type.name
+    self.current_return_type = self._check_type_ann(func.return_type)
 
     # Add parameters to scope
     for param in func.params:
-      self._define_var(param.name, param.type_ann.name)
+      self._define_var(param.name, self._check_type_ann(param.type_ann))
 
     # Check statements
     for stmt in func.body:
@@ -119,17 +171,36 @@ class TypeChecker:
     """Type check a statement."""
     match stmt:
       case LetStmt(name, type_ann, value):
-        self._check_type(type_ann.name)
+        declared_type = self._check_type_ann(type_ann)
         value_type = self._check_expr(value)
-        if value_type != type_ann.name:
-          raise TypeError(f"Cannot assign {value_type} to variable of type {type_ann.name}")
-        self._define_var(name, type_ann.name)
+        # Allow empty array literal to match any array type
+        if value_type == "[]" and is_array_type(declared_type):
+          pass  # OK: empty array assigned to array type
+        elif value_type == "[]" and is_vec_type(declared_type):
+          pass  # OK: empty array assigned to vec type
+        elif value_type != declared_type:
+          raise TypeError(f"Cannot assign {value_type} to variable of type {declared_type}")
+        self._define_var(name, declared_type)
 
       case AssignStmt(name, value):
         var_type = self._lookup_var(name)
         value_type = self._check_expr(value)
         if value_type != var_type:
           raise TypeError(f"Cannot assign {value_type} to variable of type {var_type}")
+
+      case IndexAssignStmt(target, index, value):
+        target_type = self._check_expr(target)
+        index_type = self._check_expr(index)
+        if index_type != "i64":
+          raise TypeError(f"Index must be i64, got {index_type}")
+
+        elem_type = get_element_type(target_type)
+        if elem_type is None:
+          raise TypeError(f"Cannot index into type {target_type}")
+
+        value_type = self._check_expr(value)
+        if value_type != elem_type:
+          raise TypeError(f"Cannot assign {value_type} to element of type {elem_type}")
 
       case ReturnStmt(value):
         value_type = self._check_expr(value)
@@ -194,6 +265,30 @@ class TypeChecker:
 
       case VarExpr(name):
         return self._lookup_var(name)
+
+      case ArrayLiteral(elements):
+        if not elements:
+          return "[]"  # Empty array, type determined by context
+        first_type = self._check_expr(elements[0])
+        for i, elem in enumerate(elements[1:], 2):
+          elem_type = self._check_expr(elem)
+          if elem_type != first_type:
+            raise TypeError(f"Array element {i} has type {elem_type}, expected {first_type}")
+        return f"[{first_type};{len(elements)}]"
+
+      case IndexExpr(target, index):
+        target_type = self._check_expr(target)
+        index_type = self._check_expr(index)
+        if index_type != "i64":
+          raise TypeError(f"Index must be i64, got {index_type}")
+        elem_type = get_element_type(target_type)
+        if elem_type is None:
+          raise TypeError(f"Cannot index into type {target_type}")
+        return elem_type
+
+      case MethodCallExpr(target, method, args):
+        target_type = self._check_expr(target)
+        return self._check_method_call(target_type, method, args)
 
       case BinaryExpr(left, op, right):
         left_type = self._check_expr(left)
@@ -266,6 +361,44 @@ class TypeChecker:
         return sig.return_type
 
     raise TypeError(f"Unknown expression type: {type(expr)}")
+
+  def _check_method_call(self, target_type: str, method: str, args: tuple[Expr, ...]) -> str:
+    """Type check a method call and return its return type."""
+    if is_vec_type(target_type):
+      elem_type = get_element_type(target_type)
+      assert elem_type is not None
+
+      if method == "push":
+        if len(args) != 1:
+          raise TypeError(f"push() expects 1 argument, got {len(args)}")
+        arg_type = self._check_expr(args[0])
+        if arg_type != elem_type:
+          raise TypeError(f"push() expects {elem_type}, got {arg_type}")
+        return "i64"  # push returns nothing useful, use i64
+
+      elif method == "pop":
+        if len(args) != 0:
+          raise TypeError(f"pop() expects 0 arguments, got {len(args)}")
+        return elem_type
+
+      elif method == "len":
+        if len(args) != 0:
+          raise TypeError(f"len() expects 0 arguments, got {len(args)}")
+        return "i64"
+
+      else:
+        raise TypeError(f"Unknown vec method '{method}'")
+
+    elif is_array_type(target_type):
+      if method == "len":
+        if len(args) != 0:
+          raise TypeError(f"len() expects 0 arguments, got {len(args)}")
+        return "i64"
+      else:
+        raise TypeError(f"Unknown array method '{method}'")
+
+    else:
+      raise TypeError(f"Cannot call method on type {target_type}")
 
 
 def check(program: Program) -> None:

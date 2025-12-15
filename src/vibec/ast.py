@@ -6,10 +6,29 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class TypeAnnotation:
-  """Represents a type annotation like 'i64' or 'bool'."""
+class SimpleType:
+  """Simple type like 'i64', 'bool', 'str'."""
 
   name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArrayType:
+  """Fixed-size array type like [i64; 5]."""
+
+  element_type: "TypeAnnotation"
+  size: int
+
+
+@dataclass(frozen=True, slots=True)
+class VecType:
+  """Dynamic vector type like vec[i64]."""
+
+  element_type: "TypeAnnotation"
+
+
+# Type annotation union
+TypeAnnotation = SimpleType | ArrayType | VecType
 
 
 # === Expressions ===
@@ -68,8 +87,32 @@ class CallExpr:
   args: tuple["Expr", ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ArrayLiteral:
+  """Array literal like [1, 2, 3]."""
+
+  elements: tuple["Expr", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IndexExpr:
+  """Index expression like arr[0]."""
+
+  target: "Expr"
+  index: "Expr"
+
+
+@dataclass(frozen=True, slots=True)
+class MethodCallExpr:
+  """Method call like list.push(x) or list.len()."""
+
+  target: "Expr"
+  method: str
+  args: tuple["Expr", ...]
+
+
 # Expression union type
-Expr = IntLiteral | BoolLiteral | StringLiteral | VarExpr | BinaryExpr | UnaryExpr | CallExpr
+Expr = IntLiteral | BoolLiteral | StringLiteral | VarExpr | BinaryExpr | UnaryExpr | CallExpr | ArrayLiteral | IndexExpr | MethodCallExpr
 
 
 # === Statements ===
@@ -124,6 +167,15 @@ class AssignStmt:
 
 
 @dataclass(frozen=True, slots=True)
+class IndexAssignStmt:
+  """Index assignment: arr[0] = 42"""
+
+  target: Expr
+  index: Expr
+  value: Expr
+
+
+@dataclass(frozen=True, slots=True)
 class ForStmt:
   """For loop: for i in range(start, end): body"""
 
@@ -134,7 +186,7 @@ class ForStmt:
 
 
 # Statement union type
-Stmt = LetStmt | AssignStmt | ReturnStmt | ExprStmt | IfStmt | WhileStmt | ForStmt
+Stmt = LetStmt | AssignStmt | IndexAssignStmt | ReturnStmt | ExprStmt | IfStmt | WhileStmt | ForStmt
 
 
 # === Top-level Definitions ===

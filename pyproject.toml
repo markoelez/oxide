@@ -1,7 +1,7 @@
 [project]
 name = "vibec"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Python/Rust hybrid language compiler for ARM64 macOS"
 readme = "README.md"
 authors = [
     { name = "Marko Elez", email = "markoelez7@gmail.com" }
@@ -12,6 +12,18 @@ dependencies = []
 [project.scripts]
 vibec = "vibec:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+    "pre-commit>=4.0.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

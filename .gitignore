@@ -9,6 +9,16 @@ wheels/
 # Virtual environments
 .venv
 
+# Vibec compiler output
+*.o
+*.s
+examples/factorial
+examples/fibonacci
+examples/hello
+
+# uv lock file
+uv.lock
+
 ### macOS ###
 # General
 .DS_Store

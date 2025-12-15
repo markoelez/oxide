@@ -20,6 +20,26 @@ fn main() -> i64:
     return 0
 ```
 
+## Architecture
+
+The compiler is structured as follows:
+
+```
+Source Code → Lexer → Parser → Type Checker → Code Generator → ARM64 Assembly
+```
+
+### Modules
+
+- `tokens.py` - Token definitions
+- `lexer.py` - Tokenization with Python-style indentation handling
+- `ast.py` - AST node dataclasses
+- `parser.py` - Recursive descent parser with precedence climbing
+- `checker.py` - Type checking with scoped symbol tables
+- `codegen.py` - ARM64 assembly generation for macOS
+- `compiler.py` - Pipeline orchestration
+- `cli.py` - Command-line interface
+
+
 ## Installation
 
 ```bash
@@ -48,25 +68,6 @@ vibec source.vb --emit-asm
 # Keep assembly file alongside binary
 vibec source.vb --keep-asm
 ```
-
-## Architecture
-
-The compiler is structured as a clean pipeline:
-
-```
-Source Code → Lexer → Parser → Type Checker → Code Generator → ARM64 Assembly
-```
-
-### Modules
-
-- `tokens.py` - Token definitions
-- `lexer.py` - Tokenization with Python-style indentation handling
-- `ast.py` - AST node dataclasses
-- `parser.py` - Recursive descent parser with precedence climbing
-- `checker.py` - Type checking with scoped symbol tables
-- `codegen.py` - ARM64 assembly generation for macOS
-- `compiler.py` - Pipeline orchestration
-- `cli.py` - Command-line interface
 
 ## Requirements
 

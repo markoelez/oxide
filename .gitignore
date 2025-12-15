@@ -21,6 +21,7 @@ examples/counter
 examples/collections
 examples/structs
 examples/tuples
+examples/enums
 
 # uv lock file
 uv.lock

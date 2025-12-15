@@ -4,6 +4,7 @@ from .ast import (
   Expr,
   Stmt,
   IfStmt,
+  EnumDef,
   ForStmt,
   LetStmt,
   Program,
@@ -12,8 +13,10 @@ from .ast import (
   CallExpr,
   ExprStmt,
   Function,
+  MatchArm,
   ArrayType,
   IndexExpr,
+  MatchExpr,
   Parameter,
   StructDef,
   TupleType,
@@ -25,6 +28,8 @@ from .ast import (
   ReturnStmt,
   SimpleType,
   BoolLiteral,
+  EnumLiteral,
+  EnumVariant,
   StructField,
   ArrayLiteral,
   TupleLiteral,
@@ -125,19 +130,22 @@ class Parser:
   def parse(self) -> Program:
     """Parse the entire program."""
     structs: list[StructDef] = []
+    enums: list[EnumDef] = []
     functions: list[Function] = []
     self._skip_newlines()
 
     while not self._at_end():
       if self._check(TokenType.STRUCT):
         structs.append(self._parse_struct())
+      elif self._check(TokenType.ENUM):
+        enums.append(self._parse_enum())
       elif self._check(TokenType.FN):
         functions.append(self._parse_function())
       else:
-        raise ParseError("Expected 'struct' or 'fn'", self._current())
+        raise ParseError("Expected 'struct', 'enum', or 'fn'", self._current())
       self._skip_newlines()
 
-    return Program(tuple(structs), tuple(functions))
+    return Program(tuple(structs), tuple(enums), tuple(functions))
 
   def _parse_struct(self) -> StructDef:
     """Parse: struct Name: INDENT field: type ... DEDENT"""
@@ -160,6 +168,31 @@ class Parser:
 
     self._expect(TokenType.DEDENT, "Expected dedent")
     return StructDef(name_token.value, tuple(fields))
+
+  def _parse_enum(self) -> EnumDef:
+    """Parse: enum Name: INDENT Variant1(Type) Variant2 ... DEDENT"""
+    self._expect(TokenType.ENUM, "Expected 'enum'")
+    name_token = self._expect(TokenType.IDENT, "Expected enum name")
+    self._expect(TokenType.COLON, "Expected ':'")
+    self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+    self._expect(TokenType.INDENT, "Expected indented block")
+
+    variants: list[EnumVariant] = []
+    while not self._check(TokenType.DEDENT, TokenType.EOF):
+      self._skip_newlines()
+      if self._check(TokenType.DEDENT, TokenType.EOF):
+        break
+      variant_name = self._expect(TokenType.IDENT, "Expected variant name")
+      payload_type: TypeAnnotation | None = None
+      if self._check(TokenType.LPAREN):
+        self._advance()
+        payload_type = self._parse_type()
+        self._expect(TokenType.RPAREN, "Expected ')' after payload type")
+      self._expect(TokenType.NEWLINE, "Expected newline after variant")
+      variants.append(EnumVariant(variant_name.value, payload_type))
+
+    self._expect(TokenType.DEDENT, "Expected dedent")
+    return EnumDef(name_token.value, tuple(variants))
 
   def _parse_function(self) -> Function:
     """Parse: fn name(params) -> type: INDENT body DEDENT"""
@@ -374,7 +407,9 @@ class Parser:
   def _parse_expr_stmt(self) -> ExprStmt:
     """Parse an expression statement."""
     expr = self._parse_expression()
-    self._expect(TokenType.NEWLINE, "Expected newline after expression")
+    # Match expressions already consume their block, no trailing newline needed
+    if not isinstance(expr, MatchExpr):
+      self._expect(TokenType.NEWLINE, "Expected newline after expression")
     return ExprStmt(expr)
 
   # === Expression Parsing with Precedence Climbing ===
@@ -438,12 +473,26 @@ class Parser:
       # Array literal: [1, 2, 3]
       return self._parse_array_literal()
 
+    elif token.type == TokenType.MATCH:
+      # Match expression
+      return self._parse_match()
+
     elif token.type == TokenType.IDENT:
       name = token.value
       self._advance()
 
+      # Check if it's an enum literal: EnumName::Variant or EnumName::Variant(payload)
+      if self._check(TokenType.COLONCOLON):
+        self._advance()  # consume '::'
+        variant_name = self._expect(TokenType.IDENT, "Expected variant name")
+        payload: Expr | None = None
+        if self._check(TokenType.LPAREN):
+          self._advance()
+          payload = self._parse_expression()
+          self._expect(TokenType.RPAREN, "Expected ')'")
+        return self._parse_postfix(EnumLiteral(name, variant_name.value, payload))
       # Check if it's a function call
-      if self._check(TokenType.LPAREN):
+      elif self._check(TokenType.LPAREN):
         self._advance()
         args = self._parse_arguments()
         self._expect(TokenType.RPAREN, "Expected ')'")
@@ -556,6 +605,40 @@ class Parser:
 
     self._expect(TokenType.RBRACKET, "Expected ']'")
     return ArrayLiteral(tuple(elements))
+
+  def _parse_match(self) -> MatchExpr:
+    """Parse match expression: match expr: INDENT arms... DEDENT"""
+    self._expect(TokenType.MATCH, "Expected 'match'")
+    target = self._parse_expression()
+    self._expect(TokenType.COLON, "Expected ':'")
+    self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+    self._expect(TokenType.INDENT, "Expected indented block")
+
+    arms: list[MatchArm] = []
+    while not self._check(TokenType.DEDENT, TokenType.EOF):
+      self._skip_newlines()
+      if self._check(TokenType.DEDENT, TokenType.EOF):
+        break
+
+      # Parse arm pattern: EnumName::Variant or EnumName::Variant(binding)
+      enum_name = self._expect(TokenType.IDENT, "Expected enum name")
+      self._expect(TokenType.COLONCOLON, "Expected '::'")
+      variant_name = self._expect(TokenType.IDENT, "Expected variant name")
+
+      binding: str | None = None
+      if self._check(TokenType.LPAREN):
+        self._advance()
+        binding_token = self._expect(TokenType.IDENT, "Expected binding name")
+        binding = binding_token.value
+        self._expect(TokenType.RPAREN, "Expected ')'")
+
+      self._expect(TokenType.COLON, "Expected ':'")
+      self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+      body = self._parse_block()
+      arms.append(MatchArm(enum_name.value, variant_name.value, binding, tuple(body)))
+
+    self._expect(TokenType.DEDENT, "Expected dedent")
+    return MatchExpr(target, tuple(arms))
 
   def _parse_arguments(self) -> list[Expr]:
     """Parse comma-separated arguments."""

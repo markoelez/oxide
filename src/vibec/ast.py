@@ -149,6 +149,33 @@ class TupleIndexExpr:
   index: int
 
 
+@dataclass(frozen=True, slots=True)
+class EnumLiteral:
+  """Enum variant instantiation like Option::Some(42) or Option::None."""
+
+  enum_name: str
+  variant_name: str
+  payload: "Expr | None"  # None for unit variants
+
+
+@dataclass(frozen=True, slots=True)
+class MatchArm:
+  """A single arm in a match expression."""
+
+  enum_name: str
+  variant_name: str
+  binding: str | None  # Variable name to bind payload (None for unit variants)
+  body: tuple["Stmt", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MatchExpr:
+  """Match expression: match expr: arms..."""
+
+  target: "Expr"
+  arms: tuple[MatchArm, ...]
+
+
 # Expression union type
 Expr = (
   IntLiteral
@@ -165,6 +192,8 @@ Expr = (
   | FieldAccessExpr
   | TupleLiteral
   | TupleIndexExpr
+  | EnumLiteral
+  | MatchExpr
 )
 
 
@@ -289,8 +318,25 @@ class StructDef:
 
 
 @dataclass(frozen=True, slots=True)
+class EnumVariant:
+  """A variant in an enum definition."""
+
+  name: str
+  payload_type: TypeAnnotation | None  # None for unit variants
+
+
+@dataclass(frozen=True, slots=True)
+class EnumDef:
+  """Enum definition: enum Option: Some(i64), None"""
+
+  name: str
+  variants: tuple[EnumVariant, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Program:
-  """Root node containing structs and functions."""
+  """Root node containing structs, enums, and functions."""
 
   structs: tuple[StructDef, ...]
+  enums: tuple[EnumDef, ...]
   functions: tuple[Function, ...]

@@ -9,34 +9,42 @@ A toy compiled programming language with Python/Rust hybrid syntax, targeting AR
 Vibec combines Python's indentation-based blocks with Rust's explicit type annotations:
 
 ```
+# Enums with pattern matching
+enum Option:
+    Some(i64)
+    None
+
 # Structs
 struct Point:
     x: i64
     y: i64
 
+fn unwrap_or(opt: Option, default: i64) -> i64:
+    match opt:
+        Option::Some(val):
+            return val
+        Option::None:
+            return default
+
 fn main() -> i64:
-    # Variables and control flow
+    # Enums and pattern matching
+    let x: Option = Option::Some(42)
+    let result: i64 = unwrap_or(x, 0)
+
+    # Structs
     let p: Point = Point { x: 10, y: 20 }
     p.x = 100
 
-    # Fixed-size arrays
+    # Arrays, vectors, tuples
     let arr: [i64; 3] = [1, 2, 3]
-    let sum: i64 = arr[0] + arr[1] + arr[2]
-
-    # Dynamic vectors
     let nums: vec[i64] = []
     nums.push(42)
-    nums.push(nums.pop() * 2)
-
-    # Tuples
     let t: (i64, bool) = (100, true)
-    print(t.0)
 
-    # For loops
+    # Control flow
     for i in range(5):
         print(i)
 
-    # Recursion, conditionals, arithmetic
     return factorial(5)
 
 fn factorial(n: i64) -> i64:
@@ -45,7 +53,7 @@ fn factorial(n: i64) -> i64:
     return n * factorial(n - 1)
 ```
 
-**Supported:** functions, structs, tuples `(T1, T2)`, arrays `[T; N]`, vectors `vec[T]`, `if`/`else`, `while`, `for i in range()`, arithmetic, comparisons, logical ops, `print()`
+**Supported:** enums with `match`, functions, structs, tuples `(T1, T2)`, arrays `[T; N]`, vectors `vec[T]`, `if`/`else`, `while`, `for i in range()`, arithmetic, comparisons, logical ops, `print()`
 
 ## Architecture
 

@@ -9,6 +9,8 @@ class TokenType(Enum):
   FN = auto()
   LET = auto()
   STRUCT = auto()
+  ENUM = auto()
+  MATCH = auto()
   IF = auto()
   ELSE = auto()
   WHILE = auto()
@@ -29,6 +31,7 @@ class TokenType(Enum):
 
   # Punctuation
   COLON = auto()
+  COLONCOLON = auto()
   ARROW = auto()
   LPAREN = auto()
   RPAREN = auto()
@@ -71,6 +74,8 @@ KEYWORDS: dict[str, TokenType] = {
   "fn": TokenType.FN,
   "let": TokenType.LET,
   "struct": TokenType.STRUCT,
+  "enum": TokenType.ENUM,
+  "match": TokenType.MATCH,
   "if": TokenType.IF,
   "else": TokenType.ELSE,
   "while": TokenType.WHILE,

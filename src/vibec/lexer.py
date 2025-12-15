@@ -2,7 +2,7 @@
 
 from .tokens import KEYWORDS, Token, TokenType
 
-# Single-character tokens
+# Single-character tokens (excluding : which needs special handling for ::)
 SIMPLE_TOKENS: dict[str, TokenType] = {
   "(": TokenType.LPAREN,
   ")": TokenType.RPAREN,
@@ -10,7 +10,6 @@ SIMPLE_TOKENS: dict[str, TokenType] = {
   "]": TokenType.RBRACKET,
   "{": TokenType.LBRACE,
   "}": TokenType.RBRACE,
-  ":": TokenType.COLON,
   ",": TokenType.COMMA,
   ";": TokenType.SEMICOLON,
   ".": TokenType.DOT,
@@ -160,6 +159,8 @@ class Lexer:
           self._two_char_token("=", TokenType.LE, TokenType.LT, line, col)
         case ">":
           self._two_char_token("=", TokenType.GE, TokenType.GT, line, col)
+        case ":":
+          self._two_char_token(":", TokenType.COLONCOLON, TokenType.COLON, line, col)
         case c if c in SIMPLE_TOKENS:
           self._advance()
           self._emit(SIMPLE_TOKENS[c], c, line, col)

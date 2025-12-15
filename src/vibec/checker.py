@@ -16,6 +16,7 @@ from .ast import (
   Function,
   ArrayType,
   IndexExpr,
+  MatchExpr,
   TupleType,
   UnaryExpr,
   WhileStmt,
@@ -25,6 +26,7 @@ from .ast import (
   ReturnStmt,
   SimpleType,
   BoolLiteral,
+  EnumLiteral,
   ArrayLiteral,
   TupleLiteral,
   StringLiteral,
@@ -110,6 +112,13 @@ class StructInfo:
   fields: dict[str, str]  # field_name -> field_type
 
 
+@dataclass
+class EnumInfo:
+  """Stores an enum's variant information."""
+
+  variants: dict[str, str | None]  # variant_name -> payload_type (None for unit variants)
+
+
 class TypeChecker:
   """Single-pass type checker with scoped symbol tables."""
 
@@ -121,6 +130,8 @@ class TypeChecker:
   def __init__(self) -> None:
     # Struct definitions: name -> StructInfo
     self.structs: dict[str, StructInfo] = {}
+    # Enum definitions: name -> EnumInfo
+    self.enums: dict[str, EnumInfo] = {}
     # Function signatures: name -> signature
     self.functions: dict[str, FunctionSignature] = dict(self.BUILTINS)
     # Variable scopes: list of (name -> type) dicts
@@ -153,6 +164,8 @@ class TypeChecker:
           return name
         if name in self.structs:
           return name  # Struct type
+        if name in self.enums:
+          return name  # Enum type
         raise TypeError(f"Unknown type '{name}'")
       case ArrayType(elem, size):
         if size <= 0:
@@ -175,6 +188,14 @@ class TypeChecker:
         raise TypeError(f"Struct '{struct.name}' already defined")
       self.structs[struct.name] = StructInfo({})  # Placeholder
 
+    # Register all enum definitions (before checking types)
+    for enum in program.enums:
+      if enum.name in self.enums:
+        raise TypeError(f"Enum '{enum.name}' already defined")
+      if enum.name in self.structs:
+        raise TypeError(f"'{enum.name}' already defined as a struct")
+      self.enums[enum.name] = EnumInfo({})  # Placeholder
+
     # Second pass: check struct field types (allows recursive/mutual refs)
     for struct in program.structs:
       fields: dict[str, str] = {}
@@ -184,6 +205,18 @@ class TypeChecker:
           raise TypeError(f"Duplicate field '{field.name}' in struct '{struct.name}'")
         fields[field.name] = field_type
       self.structs[struct.name] = StructInfo(fields)
+
+    # Check enum variant types
+    for enum in program.enums:
+      variants: dict[str, str | None] = {}
+      for variant in enum.variants:
+        if variant.name in variants:
+          raise TypeError(f"Duplicate variant '{variant.name}' in enum '{enum.name}'")
+        payload_type: str | None = None
+        if variant.payload_type is not None:
+          payload_type = self._check_type_ann(variant.payload_type)
+        variants[variant.name] = payload_type
+      self.enums[enum.name] = EnumInfo(variants)
 
     # Third pass: register all function signatures
     for func in program.functions:
@@ -398,6 +431,64 @@ class TypeChecker:
         if index < 0 or index >= len(elem_types):
           raise TypeError(f"Tuple index {index} out of bounds for tuple with {len(elem_types)} elements")
         return elem_types[index]
+
+      case EnumLiteral(enum_name, variant_name, payload):
+        if enum_name not in self.enums:
+          raise TypeError(f"Unknown enum '{enum_name}'")
+        enum_info = self.enums[enum_name]
+        if variant_name not in enum_info.variants:
+          raise TypeError(f"Enum '{enum_name}' has no variant '{variant_name}'")
+        expected_payload = enum_info.variants[variant_name]
+        if expected_payload is None:
+          # Unit variant - no payload allowed
+          if payload is not None:
+            raise TypeError(f"Variant '{variant_name}' does not take a payload")
+        else:
+          # Payload variant - payload required
+          if payload is None:
+            raise TypeError(f"Variant '{variant_name}' requires a payload of type {expected_payload}")
+          payload_type = self._check_expr(payload)
+          if payload_type != expected_payload:
+            raise TypeError(f"Variant '{variant_name}' expects {expected_payload}, got {payload_type}")
+        return enum_name
+
+      case MatchExpr(target, arms):
+        target_type = self._check_expr(target)
+        if target_type not in self.enums:
+          raise TypeError(f"Cannot match on non-enum type {target_type}")
+        enum_info = self.enums[target_type]
+
+        # Check each arm
+        covered_variants: set[str] = set()
+        for arm in arms:
+          if arm.enum_name != target_type:
+            raise TypeError(f"Match arm pattern uses wrong enum '{arm.enum_name}', expected '{target_type}'")
+          if arm.variant_name not in enum_info.variants:
+            raise TypeError(f"Enum '{target_type}' has no variant '{arm.variant_name}'")
+          if arm.variant_name in covered_variants:
+            raise TypeError(f"Duplicate match arm for variant '{arm.variant_name}'")
+          covered_variants.add(arm.variant_name)
+
+          # Check binding
+          variant_payload = enum_info.variants[arm.variant_name]
+          self._enter_scope()
+          if variant_payload is not None and arm.binding is not None:
+            self._define_var(arm.binding, variant_payload)
+          elif variant_payload is None and arm.binding is not None:
+            raise TypeError(f"Variant '{arm.variant_name}' has no payload to bind")
+
+          # Check arm body - get result type from last statement if it's a return
+          for stmt in arm.body:
+            self._check_stmt(stmt)
+          self._exit_scope()
+
+        # Check exhaustiveness
+        missing = set(enum_info.variants.keys()) - covered_variants
+        if missing:
+          raise TypeError(f"Non-exhaustive match: missing variants {', '.join(sorted(missing))}")
+
+        # Match expressions always return i64 (from return statements in arms)
+        return "i64"
 
       case BinaryExpr(left, op, right):
         left_type = self._check_expr(left)

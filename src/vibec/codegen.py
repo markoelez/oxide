@@ -12,8 +12,10 @@ from .ast import (
   CallExpr,
   ExprStmt,
   Function,
+  MatchArm,
   ArrayType,
   IndexExpr,
+  MatchExpr,
   TupleType,
   UnaryExpr,
   WhileStmt,
@@ -23,6 +25,7 @@ from .ast import (
   ReturnStmt,
   SimpleType,
   BoolLiteral,
+  EnumLiteral,
   ArrayLiteral,
   TupleLiteral,
   StringLiteral,
@@ -67,6 +70,11 @@ def is_tuple_type(type_str: str) -> bool:
   return type_str.startswith("(") and type_str.endswith(")")
 
 
+def is_enum_type(type_str: str, enums: dict[str, dict[str, tuple[int, bool]]]) -> bool:
+  """Check if type is an enum."""
+  return type_str in enums
+
+
 def get_tuple_size(type_str: str) -> int:
   """Get number of elements in a tuple type string."""
   if not is_tuple_type(type_str):
@@ -104,6 +112,8 @@ class CodeGenerator:
     self.string_counter = 0
     # Struct definitions: name -> list of (field_name, field_type)
     self.structs: dict[str, list[tuple[str, str]]] = {}
+    # Enum definitions: name -> dict of variant_name -> (tag, has_payload)
+    self.enums: dict[str, dict[str, tuple[int, bool]]] = {}
 
   def _emit(self, line: str) -> None:
     self.output.append(line)
@@ -209,6 +219,13 @@ class CodeGenerator:
           self._collect_strings_from_expr(elem)
       case TupleIndexExpr(target, _):
         self._collect_strings_from_expr(target)
+      case EnumLiteral(_, _, payload):
+        if payload is not None:
+          self._collect_strings_from_expr(payload)
+      case MatchExpr(target, arms):
+        self._collect_strings_from_expr(target)
+        for arm in arms:
+          self._collect_strings_from_stmts(arm.body)
       case _:
         pass
 
@@ -218,6 +235,14 @@ class CodeGenerator:
     for struct in program.structs:
       fields = [(f.name, type_to_str(f.type_ann)) for f in struct.fields]
       self.structs[struct.name] = fields
+
+    # Register enum definitions
+    for enum in program.enums:
+      variants: dict[str, tuple[int, bool]] = {}
+      for i, variant in enumerate(enum.variants):
+        has_payload = variant.payload_type is not None
+        variants[variant.name] = (i, has_payload)
+      self.enums[enum.name] = variants
 
     # First pass: collect all string literals
     self._collect_strings(program)
@@ -261,6 +286,11 @@ class CodeGenerator:
         case ForStmt(_, _, _, body):
           count += 2  # Loop variable + end value temp
           count += self._count_locals(body)
+        case ExprStmt(MatchExpr(_, arms)):
+          for arm in arms:
+            if arm.binding is not None:
+              count += 1  # Binding variable slot
+            count += self._count_locals(arm.body)
     return count
 
   def _slots_for_type(self, t: TypeAnnotation) -> int:
@@ -275,6 +305,8 @@ class CodeGenerator:
       case SimpleType(name):
         if name in self.structs:
           return len(self.structs[name])  # One slot per field
+        if name in self.enums:
+          return 2  # Enums need 2 slots: tag + payload
         return 1  # Simple types are 8 bytes
       case _:
         return 1
@@ -287,9 +319,10 @@ class CodeGenerator:
 
     # Calculate frame size: params + local variables
     # Each slot is 8 bytes, plus 16 for saved fp/lr
-    num_params = len(func.params)
+    # Note: enums take 2 slots each for both storage and registers
+    num_param_slots = sum(self._slots_for_type(p.type_ann) for p in func.params)
     num_locals = self._count_locals(func.body)
-    total_slots = num_params + num_locals
+    total_slots = num_param_slots + num_locals
 
     # Frame size: 16 (saved fp/lr) + slots, 16-byte aligned
     slots_size = total_slots * 8
@@ -308,13 +341,27 @@ class CodeGenerator:
 
     # Store parameters (first 8 in x0-x7)
     # Parameters go at [x29 - 16], [x29 - 24], etc.
-    for i, param in enumerate(func.params):
+    # Enum parameters use 2 registers (tag, payload)
+    reg_idx = 0
+    for param in func.params:
       offset = -16 - (self.next_slot * 8)
       type_str = type_to_str(param.type_ann)
       self.locals[param.name] = (offset, type_str)
-      if i < 8:
-        self._emit(f"    str x{i}, [x29, #{offset}]")
-      self.next_slot += self._slots_for_type(param.type_ann)
+      slots_needed = self._slots_for_type(param.type_ann)
+
+      if type_str in self.enums:
+        # Enum: store tag from x{reg_idx}, payload from x{reg_idx+1}
+        if reg_idx < 8:
+          self._emit(f"    str x{reg_idx}, [x29, #{offset}]")  # Tag
+        if reg_idx + 1 < 8:
+          self._emit(f"    str x{reg_idx + 1}, [x29, #{offset - 8}]")  # Payload
+        reg_idx += 2
+      else:
+        if reg_idx < 8:
+          self._emit(f"    str x{reg_idx}, [x29, #{offset}]")
+        reg_idx += 1
+
+      self.next_slot += slots_needed
 
     # Generate body
     for stmt in func.body:
@@ -395,6 +442,24 @@ class CodeGenerator:
                 for i in range(len(elems)):
                   self._emit(f"    str xzr, [x29, #{offset - i * 8}]")
             self.next_slot += len(elems)
+
+          case SimpleType(sname) if sname in self.enums:
+            # Enum type: store tag and payload (2 slots)
+            match value:
+              case EnumLiteral(_, variant_name, payload):
+                variants = self.enums[sname]
+                tag, _ = variants[variant_name]
+                self._emit(f"    mov x0, #{tag}")
+                self._emit(f"    str x0, [x29, #{offset}]")  # Tag at first slot
+                if payload is not None:
+                  self._gen_expr(payload)
+                  self._emit(f"    str x0, [x29, #{offset - 8}]")  # Payload at second slot
+                else:
+                  self._emit(f"    str xzr, [x29, #{offset - 8}]")  # Zero payload
+              case _:
+                self._emit(f"    str xzr, [x29, #{offset}]")  # Tag = 0
+                self._emit(f"    str xzr, [x29, #{offset - 8}]")  # Payload = 0
+            self.next_slot += 2
 
           case _:
             # Simple type: evaluate and store
@@ -727,6 +792,23 @@ class CodeGenerator:
             self._gen_expr(target)
             pass
 
+      case EnumLiteral(enum_name, variant_name, payload):
+        # Enum literal: just return the tag (for simple comparisons)
+        # Full enum storage is handled in LetStmt
+        variants = self.enums[enum_name]
+        tag, _ = variants[variant_name]
+        self._emit(f"    mov x0, #{tag}")
+        # If there's a payload, evaluate it but we can only return one value
+        # The payload is typically used in LetStmt context, not standalone
+        if payload is not None:
+          # Push tag, evaluate payload, then restore tag
+          self._emit("    str x0, [sp, #-16]!")
+          self._gen_expr(payload)
+          self._emit("    ldr x0, [sp], #16")  # Return tag
+
+      case MatchExpr(target, arms):
+        self._gen_match(target, arms)
+
   def _gen_print(self, args: tuple[Expr, ...]) -> None:
     """Generate code for print() builtin.
 
@@ -767,14 +849,46 @@ class CodeGenerator:
 
   def _gen_call(self, name: str, args: tuple[Expr, ...]) -> None:
     """Generate code for a function call."""
-    # Evaluate arguments and push to stack (in reverse order)
-    for arg in reversed(args):
-      self._gen_expr(arg)
-      self._emit("    str x0, [sp, #-16]!")
+    # Count total register slots needed (enums use 2)
+    slot_info: list[tuple[Expr, bool]] = []  # (arg, is_enum)
+    for arg in args:
+      is_enum = False
+      match arg:
+        case VarExpr(var_name):
+          if var_name in self.locals:
+            _, type_str = self.locals[var_name]
+            is_enum = type_str in self.enums
+      slot_info.append((arg, is_enum))
 
-    # Pop arguments into registers x0-x7
-    for i in range(len(args)):
-      self._emit(f"    ldr x{i}, [sp], #16")
+    # Evaluate arguments and push to stack (in reverse order)
+    for arg, is_enum in reversed(slot_info):
+      if is_enum:
+        # Push both tag and payload for enums
+        match arg:
+          case VarExpr(var_name):
+            offset, _ = self.locals[var_name]
+            self._emit(f"    ldr x0, [x29, #{offset - 8}]")  # Payload first (will be popped second)
+            self._emit("    str x0, [sp, #-16]!")
+            self._emit(f"    ldr x0, [x29, #{offset}]")  # Tag (will be popped first)
+            self._emit("    str x0, [sp, #-16]!")
+          case _:
+            self._gen_expr(arg)
+            self._emit("    str x0, [sp, #-16]!")
+      else:
+        self._gen_expr(arg)
+        self._emit("    str x0, [sp, #-16]!")
+
+    # Pop arguments into registers
+    reg_idx = 0
+    for _, is_enum in slot_info:
+      if is_enum:
+        self._emit(f"    ldr x{reg_idx}, [sp], #16")  # Tag
+        reg_idx += 1
+        self._emit(f"    ldr x{reg_idx}, [sp], #16")  # Payload
+        reg_idx += 1
+      else:
+        self._emit(f"    ldr x{reg_idx}, [sp], #16")
+        reg_idx += 1
 
     # Call function
     self._emit(f"    bl _{name}")
@@ -892,6 +1006,64 @@ class CodeGenerator:
               size = get_array_size(type_str)
               if size is not None:
                 self._emit(f"    mov x0, #{size}")
+
+  def _gen_match(self, target: Expr, arms: tuple[MatchArm, ...]) -> None:
+    """Generate code for a match expression."""
+    end_label = self._new_label("match_end")
+
+    # Get the enum variable's tag
+    match target:
+      case VarExpr(name):
+        var_offset, _ = self.locals[name]
+        # Load tag from first slot of enum variable
+        self._emit(f"    ldr x8, [x29, #{var_offset}]")  # Tag in x8
+      case _:
+        # For complex expressions, we'd need to evaluate and store
+        self._gen_expr(target)
+        self._emit("    mov x8, x0")
+
+    # Generate comparison chain for each arm
+    arm_labels: list[str] = []
+    for arm in arms:
+      arm_labels.append(self._new_label("match_arm"))
+
+    for i, arm in enumerate(arms):
+      variants = self.enums[arm.enum_name]
+      tag, has_payload = variants[arm.variant_name]
+
+      # Compare tag
+      self._emit(f"    cmp x8, #{tag}")
+      self._emit(f"    b.eq {arm_labels[i]}")
+
+    # Fall through to end (should never happen with exhaustive match)
+    self._emit(f"    b {end_label}")
+
+    # Generate code for each arm
+    for i, arm in enumerate(arms):
+      self._emit(f"{arm_labels[i]}:")
+      variants = self.enums[arm.enum_name]
+      _, has_payload = variants[arm.variant_name]
+
+      # If there's a binding, allocate slot and store payload
+      if arm.binding is not None and has_payload:
+        binding_offset = -16 - (self.next_slot * 8)
+        self.locals[arm.binding] = (binding_offset, "i64")  # Assume i64 for now
+        self.next_slot += 1
+        # Load payload from enum variable
+        match target:
+          case VarExpr(name):
+            var_offset, _ = self.locals[name]
+            self._emit(f"    ldr x0, [x29, #{var_offset - 8}]")  # Payload
+            self._emit(f"    str x0, [x29, #{binding_offset}]")
+
+      # Generate arm body
+      for stmt in arm.body:
+        self._gen_stmt(stmt)
+
+      self._emit(f"    b {end_label}")
+
+    self._emit(f"{end_label}:")
+    # Match result is in x0 from the last executed arm's return
 
 
 def generate(program: Program) -> str:

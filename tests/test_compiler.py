@@ -60,12 +60,14 @@ class TestLexer:
     assert TokenType.GE in types
 
   def test_keywords(self):
-    source = "fn let struct if else while for in range return and or not true false"
+    source = "fn let struct enum match if else while for in range return and or not true false"
     tokens = tokenize(source)
     types = [t.type for t in tokens]
     assert TokenType.FN in types
     assert TokenType.LET in types
     assert TokenType.STRUCT in types
+    assert TokenType.ENUM in types
+    assert TokenType.MATCH in types
     assert TokenType.IF in types
     assert TokenType.ELSE in types
     assert TokenType.WHILE in types
@@ -78,6 +80,13 @@ class TestLexer:
     assert TokenType.NOT in types
     assert TokenType.TRUE in types
     assert TokenType.FALSE in types
+
+  def test_coloncolon(self):
+    source = "Option::Some"
+    tokens = tokenize(source)
+    types = [t.type for t in tokens]
+    assert TokenType.IDENT in types
+    assert TokenType.COLONCOLON in types
 
   def test_braces(self):
     source = "{ }"
@@ -395,6 +404,69 @@ fn main() -> i64:
     assert isinstance(stmt.value, TupleIndexExpr)
     assert stmt.value.index == 0
 
+  def test_enum_definition(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import EnumDef
+
+    assert len(ast.enums) == 1
+    enum = ast.enums[0]
+    assert isinstance(enum, EnumDef)
+    assert enum.name == "Option"
+    assert len(enum.variants) == 2
+    assert enum.variants[0].name == "Some"
+    assert enum.variants[0].payload_type is not None
+    assert enum.variants[1].name == "None"
+    assert enum.variants[1].payload_type is None
+
+  def test_enum_literal(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(42)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import LetStmt, EnumLiteral
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.value, EnumLiteral)
+    assert stmt.value.enum_name == "Option"
+    assert stmt.value.variant_name == "Some"
+
+  def test_match_expression(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(42)
+    match x:
+        Option::Some(val):
+            return val
+        Option::None:
+            return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import ExprStmt, MatchExpr
+
+    stmt = ast.functions[0].body[1]
+    assert isinstance(stmt, ExprStmt)
+    assert isinstance(stmt.expr, MatchExpr)
+    assert len(stmt.expr.arms) == 2
+
 
 class TestChecker:
   def test_type_mismatch(self):
@@ -635,6 +707,130 @@ fn main() -> i64:
     from vibec.checker import TypeError
 
     with pytest.raises(TypeError):
+      check(ast)
+
+  def test_enum_valid(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(42)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_enum_unknown(self):
+    source = """fn main() -> i64:
+    let x: Unknown = Unknown::Variant(1)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_enum_unknown_variant(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Unknown(42)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_enum_payload_mismatch(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(true)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_enum_missing_payload(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_enum_unexpected_payload(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::None(42)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_match_exhaustive(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(42)
+    match x:
+        Option::Some(val):
+            return val
+        Option::None:
+            return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_match_non_exhaustive(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(42)
+    match x:
+        Option::Some(val):
+            return val
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Non-exhaustive match"):
       check(ast)
 
 
@@ -1041,3 +1237,76 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 40
+
+  def test_enum_basic(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::Some(42)
+    match x:
+        Option::Some(val):
+            return val
+        Option::None:
+            return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_enum_none_variant(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn main() -> i64:
+    let x: Option = Option::None
+    match x:
+        Option::Some(val):
+            return val
+        Option::None:
+            return 99
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 99
+
+  def test_enum_multiple_variants(self):
+    source = """enum Result:
+    Ok(i64)
+    Err(i64)
+    Unknown
+
+fn main() -> i64:
+    let r: Result = Result::Err(42)
+    match r:
+        Result::Ok(val):
+            return val
+        Result::Err(code):
+            return code + 100
+        Result::Unknown:
+            return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 142
+
+  def test_enum_in_function(self):
+    source = """enum Option:
+    Some(i64)
+    None
+
+fn unwrap_or(opt: Option, default: i64) -> i64:
+    match opt:
+        Option::Some(val):
+            return val
+        Option::None:
+            return default
+
+fn main() -> i64:
+    let x: Option = Option::Some(10)
+    let y: Option = Option::None
+    let a: i64 = unwrap_or(x, 0)
+    let b: i64 = unwrap_or(y, 99)
+    return a + b
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 109  # 10 + 99

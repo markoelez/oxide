@@ -1001,6 +1001,100 @@ class TypeChecker:
           raise TypeError(f"len() expects 0 arguments, got {len(args)}")
         return "i64"
 
+      # Functional iterator methods
+      elif method == "into_iter":
+        if len(args) != 0:
+          raise TypeError(f"into_iter() expects 0 arguments, got {len(args)}")
+        return target_type  # Returns same vec type (eager evaluation)
+
+      elif method == "iter":
+        if len(args) != 0:
+          raise TypeError(f"iter() expects 0 arguments, got {len(args)}")
+        return target_type  # Returns same vec type (eager evaluation)
+
+      elif method == "skip":
+        if len(args) != 1:
+          raise TypeError(f"skip() expects 1 argument, got {len(args)}")
+        arg_type = self._check_expr(args[0])
+        if arg_type != "i64":
+          raise TypeError(f"skip() expects i64, got {arg_type}")
+        return target_type  # Returns new vec of same type
+
+      elif method == "take":
+        if len(args) != 1:
+          raise TypeError(f"take() expects 1 argument, got {len(args)}")
+        arg_type = self._check_expr(args[0])
+        if arg_type != "i64":
+          raise TypeError(f"take() expects i64, got {arg_type}")
+        return target_type  # Returns new vec of same type
+
+      elif method == "map":
+        if len(args) != 1:
+          raise TypeError(f"map() expects 1 argument (closure), got {len(args)}")
+        closure_type = self._check_expr(args[0])
+        if not is_fn_type(closure_type):
+          raise TypeError(f"map() expects a closure, got {closure_type}")
+        parsed = parse_fn_type(closure_type)
+        if parsed is None:
+          raise TypeError(f"Invalid closure type '{closure_type}'")
+        param_types, return_type = parsed
+        if len(param_types) != 1:
+          raise TypeError(f"map() closure must take 1 argument, got {len(param_types)}")
+        if param_types[0] != elem_type:
+          raise TypeError(f"map() closure expects {elem_type}, got {param_types[0]}")
+        return f"vec[{return_type}]"  # Returns vec of closure return type
+
+      elif method == "filter":
+        if len(args) != 1:
+          raise TypeError(f"filter() expects 1 argument (closure), got {len(args)}")
+        closure_type = self._check_expr(args[0])
+        if not is_fn_type(closure_type):
+          raise TypeError(f"filter() expects a closure, got {closure_type}")
+        parsed = parse_fn_type(closure_type)
+        if parsed is None:
+          raise TypeError(f"Invalid closure type '{closure_type}'")
+        param_types, return_type = parsed
+        if len(param_types) != 1:
+          raise TypeError(f"filter() closure must take 1 argument, got {len(param_types)}")
+        if param_types[0] != elem_type:
+          raise TypeError(f"filter() closure expects {elem_type}, got {param_types[0]}")
+        if return_type != "bool":
+          raise TypeError(f"filter() closure must return bool, got {return_type}")
+        return target_type  # Returns vec of same type
+
+      elif method == "collect":
+        if len(args) != 0:
+          raise TypeError(f"collect() expects 0 arguments, got {len(args)}")
+        return target_type  # Returns the vec (no-op for eager evaluation)
+
+      elif method == "sum":
+        if len(args) != 0:
+          raise TypeError(f"sum() expects 0 arguments, got {len(args)}")
+        if elem_type != "i64":
+          raise TypeError(f"sum() requires vec[i64], got {target_type}")
+        return "i64"
+
+      elif method == "fold":
+        if len(args) != 2:
+          raise TypeError(f"fold() expects 2 arguments (init, closure), got {len(args)}")
+        init_type = self._check_expr(args[0])
+        closure_type = self._check_expr(args[1])
+        if not is_fn_type(closure_type):
+          raise TypeError(f"fold() expects a closure as second argument, got {closure_type}")
+        parsed = parse_fn_type(closure_type)
+        if parsed is None:
+          raise TypeError(f"Invalid closure type '{closure_type}'")
+        param_types, return_type = parsed
+        if len(param_types) != 2:
+          raise TypeError(f"fold() closure must take 2 arguments (acc, elem), got {len(param_types)}")
+        if param_types[0] != init_type:
+          raise TypeError(f"fold() closure accumulator type {param_types[0]} doesn't match init type {init_type}")
+        if param_types[1] != elem_type:
+          raise TypeError(f"fold() closure element type {param_types[1]} doesn't match vec element type {elem_type}")
+        if return_type != init_type:
+          raise TypeError(f"fold() closure return type {return_type} doesn't match accumulator type {init_type}")
+        return init_type
+
       else:
         raise TypeError(f"Unknown vec method '{method}'")
 

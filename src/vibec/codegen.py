@@ -543,14 +543,22 @@ class CodeGenerator:
             self.next_slot += slots_needed
 
           case VecType(_):
-            # List: allocate initial buffer (16 elements * 8 bytes + 16 header)
-            # Header: [capacity, length] at base, data follows
-            self._emit("    mov x0, #144")  # 16 + 16*8 = 144 bytes
-            self._emit("    bl _malloc")
-            self._emit("    mov x1, #16")  # Initial capacity
-            self._emit("    str x1, [x0]")  # Store capacity
-            self._emit("    str xzr, [x0, #8]")  # Length = 0
-            self._emit(f"    str x0, [x29, #{offset}]")
+            # Check if value is empty array literal -> allocate new vec
+            # Otherwise, evaluate expression (returns vec pointer) and store it
+            match value:
+              case ArrayLiteral(elements) if not elements:
+                # Empty array: allocate initial buffer (16 elements * 8 bytes + 16 header)
+                # Header: [capacity, length] at base, data follows
+                self._emit("    mov x0, #144")  # 16 + 16*8 = 144 bytes
+                self._emit("    bl _malloc")
+                self._emit("    mov x1, #16")  # Initial capacity
+                self._emit("    str x1, [x0]")  # Store capacity
+                self._emit("    str xzr, [x0, #8]")  # Length = 0
+                self._emit(f"    str x0, [x29, #{offset}]")
+              case _:
+                # Expression returns vec pointer (from skip, take, map, etc.)
+                self._gen_expr(value)
+                self._emit(f"    str x0, [x29, #{offset}]")
             self.next_slot += 1
 
           case SimpleType(name) if name in self.structs:
@@ -1140,145 +1148,805 @@ class CodeGenerator:
 
   def _gen_method_call(self, target: Expr, method: str, args: tuple[Expr, ...]) -> None:
     """Generate code for method calls on lists/arrays."""
-    match target:
-      case VarExpr(name):
-        offset, type_str = self.locals[name]
+    # For chained method calls (non-VarExpr target), evaluate and use _from_ptr methods
+    if not isinstance(target, VarExpr):
+      self._gen_expr(target)
+      self._emit("    str x0, [sp, #-16]!")  # Push vec ptr
 
-        if is_vec_type(type_str):
-          match method:
-            case "push":
-              # push(value): list.data[list.len++] = value
-              # First check if we need to grow
-              grow_label = self._new_label("grow")
-              done_label = self._new_label("push_done")
+      match method:
+        case "into_iter" | "iter" | "collect":
+          self._emit("    ldr x0, [sp], #16")
+        case "skip":
+          self._gen_vec_skip_from_ptr(args[0])
+        case "take":
+          self._gen_vec_take_from_ptr(args[0])
+        case "map":
+          self._gen_vec_map_from_ptr(args[0])
+        case "filter":
+          self._gen_vec_filter_from_ptr(args[0])
+        case "sum":
+          self._gen_vec_sum_from_ptr()
+        case "fold":
+          self._gen_vec_fold_from_ptr(args[0], args[1])
+        case "len":
+          self._emit("    ldr x9, [sp], #16")
+          self._emit("    ldr x0, [x9, #8]")
+        case "pop":
+          self._emit("    ldr x9, [sp], #16")
+          self._emit("    ldr x10, [x9, #8]")
+          self._emit("    sub x10, x10, #1")
+          self._emit("    str x10, [x9, #8]")
+          self._emit("    add x9, x9, #16")
+          self._emit("    ldr x0, [x9, x10, lsl #3]")
+        case _:
+          self._emit("    add sp, sp, #16")  # Clean up
+      return
 
-              self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
-              self._emit("    ldr x10, [x9]")  # Capacity
-              self._emit("    ldr x11, [x9, #8]")  # Length
+    # VarExpr target - original variable-based dispatch
+    name = target.name
+    offset, type_str = self.locals[name]
 
-              # Check if len >= capacity
-              self._emit("    cmp x11, x10")
-              self._emit(f"    b.ge {grow_label}")
+    if is_vec_type(type_str):
+      match method:
+        case "push":
+          # push(value): list.data[list.len++] = value
+          # First check if we need to grow
+          grow_label = self._new_label("grow")
+          done_label = self._new_label("push_done")
 
-              # Store the value
-              self._gen_expr(args[0])
-              self._emit("    mov x12, x0")  # Value in x12
-              self._emit(f"    ldr x9, [x29, #{offset}]")  # Reload base
-              self._emit("    ldr x11, [x9, #8]")  # Length
-              self._emit("    add x13, x9, #16")  # Data start
-              self._emit("    str x12, [x13, x11, lsl #3]")
+          self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
+          self._emit("    ldr x10, [x9]")  # Capacity
+          self._emit("    ldr x11, [x9, #8]")  # Length
 
-              # Increment length
-              self._emit("    add x11, x11, #1")
-              self._emit("    str x11, [x9, #8]")
-              self._emit("    mov x0, #0")  # Return 0
-              self._emit(f"    b {done_label}")
+          # Check if len >= capacity
+          self._emit("    cmp x11, x10")
+          self._emit(f"    b.ge {grow_label}")
 
-              # Grow the list (double capacity)
-              self._emit(f"{grow_label}:")
-              self._emit(f"    ldr x9, [x29, #{offset}]")
-              self._emit("    ldr x10, [x9]")  # Old capacity
-              self._emit("    lsl x10, x10, #1")  # Double it
-              self._emit("    add x0, x10, #2")  # new_cap + 2 (header)
-              self._emit("    lsl x0, x0, #3")  # * 8 bytes
-              self._emit("    bl _malloc")  # New buffer in x0
+          # Store the value
+          self._gen_expr(args[0])
+          self._emit("    mov x12, x0")  # Value in x12
+          self._emit(f"    ldr x9, [x29, #{offset}]")  # Reload base
+          self._emit("    ldr x11, [x9, #8]")  # Length
+          self._emit("    add x13, x9, #16")  # Data start
+          self._emit("    str x12, [x13, x11, lsl #3]")
 
-              # Copy header and data
-              self._emit(f"    ldr x9, [x29, #{offset}]")  # Old base
-              self._emit("    ldr x1, [x9]")  # Old capacity
-              self._emit("    lsl x1, x1, #1")  # New capacity
-              self._emit("    str x1, [x0]")  # Store new capacity
-              self._emit("    ldr x2, [x9, #8]")  # Length
-              self._emit("    str x2, [x0, #8]")  # Copy length
+          # Increment length
+          self._emit("    add x11, x11, #1")
+          self._emit("    str x11, [x9, #8]")
+          self._emit("    mov x0, #0")  # Return 0
+          self._emit(f"    b {done_label}")
 
-              # Copy data elements
-              copy_loop = self._new_label("copy")
-              copy_done = self._new_label("copy_done")
-              self._emit("    mov x3, #0")  # Counter
-              self._emit(f"{copy_loop}:")
-              self._emit("    cmp x3, x2")
-              self._emit(f"    b.ge {copy_done}")
-              self._emit("    add x4, x9, #16")  # Old data
-              self._emit("    ldr x5, [x4, x3, lsl #3]")
-              self._emit("    add x4, x0, #16")  # New data
-              self._emit("    str x5, [x4, x3, lsl #3]")
-              self._emit("    add x3, x3, #1")
-              self._emit(f"    b {copy_loop}")
-              self._emit(f"{copy_done}:")
+          # Grow the list (double capacity)
+          self._emit(f"{grow_label}:")
+          self._emit(f"    ldr x9, [x29, #{offset}]")
+          self._emit("    ldr x10, [x9]")  # Old capacity
+          self._emit("    lsl x10, x10, #1")  # Double it
+          self._emit("    add x0, x10, #2")  # new_cap + 2 (header)
+          self._emit("    lsl x0, x0, #3")  # * 8 bytes
+          self._emit("    bl _malloc")  # New buffer in x0
 
-              # Free old buffer
-              self._emit("    str x0, [sp, #-16]!")  # Save new pointer
-              self._emit("    mov x0, x9")
-              self._emit("    bl _free")
-              self._emit("    ldr x9, [sp], #16")  # Restore new pointer
+          # Copy header and data
+          self._emit(f"    ldr x9, [x29, #{offset}]")  # Old base
+          self._emit("    ldr x1, [x9]")  # Old capacity
+          self._emit("    lsl x1, x1, #1")  # New capacity
+          self._emit("    str x1, [x0]")  # Store new capacity
+          self._emit("    ldr x2, [x9, #8]")  # Length
+          self._emit("    str x2, [x0, #8]")  # Copy length
 
-              # Update local variable
-              self._emit(f"    str x9, [x29, #{offset}]")
+          # Copy data elements
+          copy_loop = self._new_label("copy")
+          copy_done = self._new_label("copy_done")
+          self._emit("    mov x3, #0")  # Counter
+          self._emit(f"{copy_loop}:")
+          self._emit("    cmp x3, x2")
+          self._emit(f"    b.ge {copy_done}")
+          self._emit("    add x4, x9, #16")  # Old data
+          self._emit("    ldr x5, [x4, x3, lsl #3]")
+          self._emit("    add x4, x0, #16")  # New data
+          self._emit("    str x5, [x4, x3, lsl #3]")
+          self._emit("    add x3, x3, #1")
+          self._emit(f"    b {copy_loop}")
+          self._emit(f"{copy_done}:")
 
-              # Now do the push on new buffer
-              self._emit("    ldr x11, [x9, #8]")  # Length
-              self._gen_expr(args[0])
-              self._emit("    mov x12, x0")
-              self._emit(f"    ldr x9, [x29, #{offset}]")
-              self._emit("    ldr x11, [x9, #8]")
-              self._emit("    add x13, x9, #16")
-              self._emit("    str x12, [x13, x11, lsl #3]")
-              self._emit("    add x11, x11, #1")
-              self._emit("    str x11, [x9, #8]")
-              self._emit("    mov x0, #0")
+          # Free old buffer
+          self._emit("    str x0, [sp, #-16]!")  # Save new pointer
+          self._emit("    mov x0, x9")
+          self._emit("    bl _free")
+          self._emit("    ldr x9, [sp], #16")  # Restore new pointer
 
-              self._emit(f"{done_label}:")
+          # Update local variable
+          self._emit(f"    str x9, [x29, #{offset}]")
 
-            case "pop":
-              # pop(): return list.data[--list.len]
-              self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
-              self._emit("    ldr x10, [x9, #8]")  # Length
-              self._emit("    sub x10, x10, #1")  # Decrement
-              self._emit("    str x10, [x9, #8]")  # Store new length
-              self._emit("    add x9, x9, #16")  # Data start
-              self._emit("    ldr x0, [x9, x10, lsl #3]")  # Return value
+          # Now do the push on new buffer
+          self._emit("    ldr x11, [x9, #8]")  # Length
+          self._gen_expr(args[0])
+          self._emit("    mov x12, x0")
+          self._emit(f"    ldr x9, [x29, #{offset}]")
+          self._emit("    ldr x11, [x9, #8]")
+          self._emit("    add x13, x9, #16")
+          self._emit("    str x12, [x13, x11, lsl #3]")
+          self._emit("    add x11, x11, #1")
+          self._emit("    str x11, [x9, #8]")
+          self._emit("    mov x0, #0")
 
-            case "len":
-              # len(): return list.len
-              self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
-              self._emit("    ldr x0, [x9, #8]")  # Length
+          self._emit(f"{done_label}:")
 
-        elif type_str in self.struct_methods and method in self.struct_methods[type_str]:
-          # Struct method call
-          mangled_name = self.struct_methods[type_str][method]
-          struct_fields = self.structs[type_str]
+        case "pop":
+          # pop(): return list.data[--list.len]
+          self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
+          self._emit("    ldr x10, [x9, #8]")  # Length
+          self._emit("    sub x10, x10, #1")  # Decrement
+          self._emit("    str x10, [x9, #8]")  # Store new length
+          self._emit("    add x9, x9, #16")  # Data start
+          self._emit("    ldr x0, [x9, x10, lsl #3]")  # Return value
 
-          # Push all arguments (including self) to stack in reverse order
-          # First, push the explicit arguments in reverse
-          for arg in reversed(args):
-            self._gen_expr(arg)
-            self._emit("    str x0, [sp, #-16]!")
+        case "len":
+          # len(): return list.len
+          self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
+          self._emit("    ldr x0, [x9, #8]")  # Length
 
-          # Then push self (struct fields in reverse order)
-          for i in range(len(struct_fields) - 1, -1, -1):
-            self._emit(f"    ldr x0, [x29, #{offset - i * 8}]")
-            self._emit("    str x0, [sp, #-16]!")
+        case "into_iter" | "iter" | "collect":
+          # These are no-ops for eager evaluation - just return the vec pointer
+          self._emit(f"    ldr x0, [x29, #{offset}]")
 
-          # Pop into registers: self fields first, then args
-          reg_idx = 0
-          for _ in struct_fields:
-            self._emit(f"    ldr x{reg_idx}, [sp], #16")
-            reg_idx += 1
-          for _ in args:
-            self._emit(f"    ldr x{reg_idx}, [sp], #16")
-            reg_idx += 1
+        case "skip":
+          # skip(n): create new vec without first n elements
+          self._gen_vec_skip(offset, args[0])
 
-          # Call the method
-          self._emit(f"    bl _{mangled_name}")
+        case "take":
+          # take(n): create new vec with only first n elements
+          self._gen_vec_take(offset, args[0])
 
-        else:
-          # Array methods
-          match method:
-            case "len":
-              # Array length is compile-time constant
-              size = get_array_size(type_str)
-              if size is not None:
-                self._emit(f"    mov x0, #{size}")
+        case "map":
+          # map(closure): create new vec with closure applied to each element
+          self._gen_vec_map(offset, args[0])
+
+        case "filter":
+          # filter(closure): create new vec with elements matching predicate
+          self._gen_vec_filter(offset, args[0])
+
+        case "sum":
+          # sum(): return sum of all elements (for vec[i64])
+          self._gen_vec_sum(offset)
+
+        case "fold":
+          # fold(init, closure): reduce vec to single value
+          self._gen_vec_fold(offset, args[0], args[1])
+
+    elif type_str in self.struct_methods and method in self.struct_methods[type_str]:
+      # Struct method call
+      mangled_name = self.struct_methods[type_str][method]
+      struct_fields = self.structs[type_str]
+
+      # Push all arguments (including self) to stack in reverse order
+      # First, push the explicit arguments in reverse
+      for arg in reversed(args):
+        self._gen_expr(arg)
+        self._emit("    str x0, [sp, #-16]!")
+
+      # Then push self (struct fields in reverse order)
+      for i in range(len(struct_fields) - 1, -1, -1):
+        self._emit(f"    ldr x0, [x29, #{offset - i * 8}]")
+        self._emit("    str x0, [sp, #-16]!")
+
+      # Pop into registers: self fields first, then args
+      reg_idx = 0
+      for _ in struct_fields:
+        self._emit(f"    ldr x{reg_idx}, [sp], #16")
+        reg_idx += 1
+      for _ in args:
+        self._emit(f"    ldr x{reg_idx}, [sp], #16")
+        reg_idx += 1
+
+      # Call the method
+      self._emit(f"    bl _{mangled_name}")
+
+    else:
+      # Array methods
+      match method:
+        case "len":
+          # Array length is compile-time constant
+          size = get_array_size(type_str)
+          if size is not None:
+            self._emit(f"    mov x0, #{size}")
+
+  def _gen_vec_skip(self, src_offset: int, skip_expr: Expr) -> None:
+    """Generate code for vec.skip(n) - creates new vec without first n elements."""
+    # Evaluate skip count
+    self._gen_expr(skip_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Save skip count
+
+    # Load source vec info
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")  # Source base
+    self._emit("    ldr x10, [x9, #8]")  # Source length
+
+    # Calculate new length = max(0, len - skip)
+    self._emit("    ldr x11, [sp]")  # Skip count
+    self._emit("    subs x12, x10, x11")  # new_len = len - skip
+    skip_negative = self._new_label("skip_neg")
+    skip_continue = self._new_label("skip_cont")
+    self._emit(f"    b.lt {skip_negative}")
+    self._emit(f"    b {skip_continue}")
+    self._emit(f"{skip_negative}:")
+    self._emit("    mov x12, #0")  # new_len = 0 if negative
+    self._emit(f"{skip_continue}:")
+
+    # Allocate new vec: 16 (header) + new_len * 8
+    self._emit("    add x0, x12, #2")  # capacity = new_len
+    self._emit("    lsl x0, x0, #3")  # * 8
+    self._emit("    str x12, [sp, #-16]!")  # Save new_len
+    self._emit("    bl _malloc")
+
+    # Set up new vec header
+    self._emit("    ldr x12, [sp], #16")  # Restore new_len
+    self._emit("    str x12, [x0]")  # capacity = new_len
+    self._emit("    str x12, [x0, #8]")  # length = new_len
+
+    # Copy elements: src[skip..] -> dest[0..]
+    self._emit("    ldr x11, [sp], #16")  # Restore skip count
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")  # Source base
+    self._emit("    add x9, x9, #16")  # Source data start
+    self._emit("    add x9, x9, x11, lsl #3")  # Offset by skip count
+    self._emit("    add x13, x0, #16")  # Dest data start
+    self._emit("    mov x14, #0")  # Counter
+
+    copy_loop = self._new_label("skip_copy")
+    copy_done = self._new_label("skip_copy_done")
+    self._emit(f"{copy_loop}:")
+    self._emit("    cmp x14, x12")  # Compare counter with new_len
+    self._emit(f"    b.ge {copy_done}")
+    self._emit("    ldr x15, [x9, x14, lsl #3]")  # Load source[i + skip]
+    self._emit("    str x15, [x13, x14, lsl #3]")  # Store dest[i]
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {copy_loop}")
+    self._emit(f"{copy_done}:")
+
+    # x0 already has the new vec pointer
+
+  def _gen_vec_take(self, src_offset: int, take_expr: Expr) -> None:
+    """Generate code for vec.take(n) - creates new vec with only first n elements."""
+    # Evaluate take count
+    self._gen_expr(take_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Save take count
+
+    # Load source vec info
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")  # Source base
+    self._emit("    ldr x10, [x9, #8]")  # Source length
+
+    # Calculate new length = min(len, take)
+    self._emit("    ldr x11, [sp]")  # Take count
+    self._emit("    cmp x10, x11")
+    take_min = self._new_label("take_min")
+    take_use_take = self._new_label("take_use")
+    self._emit(f"    b.lt {take_min}")
+    self._emit("    mov x12, x11")  # new_len = take
+    self._emit(f"    b {take_use_take}")
+    self._emit(f"{take_min}:")
+    self._emit("    mov x12, x10")  # new_len = len
+    self._emit(f"{take_use_take}:")
+
+    # Allocate new vec
+    self._emit("    add x0, x12, #2")  # capacity = new_len
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    str x12, [sp, #-16]!")  # Save new_len
+    self._emit("    bl _malloc")
+
+    # Set up new vec header
+    self._emit("    ldr x12, [sp], #16")  # Restore new_len
+    self._emit("    add sp, sp, #16")  # Pop take count (not needed anymore)
+    self._emit("    str x12, [x0]")  # capacity
+    self._emit("    str x12, [x0, #8]")  # length
+
+    # Copy first new_len elements
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")  # Source base
+    self._emit("    add x9, x9, #16")  # Source data
+    self._emit("    add x13, x0, #16")  # Dest data
+    self._emit("    mov x14, #0")
+
+    copy_loop = self._new_label("take_copy")
+    copy_done = self._new_label("take_copy_done")
+    self._emit(f"{copy_loop}:")
+    self._emit("    cmp x14, x12")
+    self._emit(f"    b.ge {copy_done}")
+    self._emit("    ldr x15, [x9, x14, lsl #3]")
+    self._emit("    str x15, [x13, x14, lsl #3]")
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {copy_loop}")
+    self._emit(f"{copy_done}:")
+
+  def _gen_vec_map(self, src_offset: int, closure_expr: Expr) -> None:
+    """Generate code for vec.map(closure) - creates new vec with closure applied."""
+    # Evaluate closure to get function pointer
+    self._gen_expr(closure_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Save closure pointer
+
+    # Load source vec info
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")
+    self._emit("    ldr x10, [x9, #8]")  # Length
+    self._emit("    str x10, [sp, #-16]!")  # Save length
+
+    # Allocate new vec of same size
+    self._emit("    add x0, x10, #2")
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    bl _malloc")
+    self._emit("    str x0, [sp, #-16]!")  # Save new vec pointer
+
+    # Set up header
+    self._emit("    ldr x10, [sp, #16]")  # Get length
+    self._emit("    str x10, [x0]")  # capacity
+    self._emit("    str x10, [x0, #8]")  # length
+
+    # Map each element
+    self._emit("    mov x14, #0")  # Counter
+    map_loop = self._new_label("map_loop")
+    map_done = self._new_label("map_done")
+    self._emit(f"{map_loop}:")
+    self._emit("    ldr x10, [sp, #16]")  # Length
+    self._emit("    cmp x14, x10")
+    self._emit(f"    b.ge {map_done}")
+
+    # Save counter
+    self._emit("    str x14, [sp, #-16]!")
+
+    # Load element from source
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")
+    self._emit("    add x9, x9, #16")
+    self._emit("    ldr x0, [x9, x14, lsl #3]")  # x0 = source[i]
+
+    # Call closure
+    # Stack: [index] [new_vec] [len] [closure] = sp+0, sp+16, sp+32, sp+48
+    self._emit("    ldr x9, [sp, #48]")  # Closure pointer
+    self._emit("    blr x9")
+
+    # Store result in dest
+    self._emit("    ldr x14, [sp], #16")  # Restore counter
+    self._emit("    ldr x13, [sp]")  # New vec pointer
+    self._emit("    add x13, x13, #16")
+    self._emit("    str x0, [x13, x14, lsl #3]")
+
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {map_loop}")
+    self._emit(f"{map_done}:")
+
+    # Return new vec pointer
+    self._emit("    ldr x0, [sp], #16")  # Pop new vec ptr
+    self._emit("    add sp, sp, #16")  # Pop length
+    self._emit("    add sp, sp, #16")  # Pop closure ptr
+
+  def _gen_vec_filter(self, src_offset: int, closure_expr: Expr) -> None:
+    """Generate code for vec.filter(closure) - creates new vec with matching elements."""
+    # Evaluate closure
+    self._gen_expr(closure_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Save closure
+
+    # Load source info
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")
+    self._emit("    ldr x10, [x9, #8]")  # Length
+
+    # Allocate new vec (same capacity as source, will have len <= original)
+    self._emit("    add x0, x10, #2")
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    str x10, [sp, #-16]!")  # Save original length
+    self._emit("    bl _malloc")
+    self._emit("    str x0, [sp, #-16]!")  # Save new vec
+
+    # Initialize: capacity = original_len, length = 0
+    self._emit("    ldr x10, [sp, #16]")  # Original length
+    self._emit("    str x10, [x0]")  # capacity
+    self._emit("    str xzr, [x0, #8]")  # length = 0
+
+    # Filter loop
+    self._emit("    mov x14, #0")  # Source index
+    filter_loop = self._new_label("filter_loop")
+    filter_done = self._new_label("filter_done")
+    filter_skip = self._new_label("filter_skip")
+    self._emit(f"{filter_loop}:")
+    self._emit("    ldr x10, [sp, #16]")  # Original length
+    self._emit("    cmp x14, x10")
+    self._emit(f"    b.ge {filter_done}")
+
+    # Save index
+    self._emit("    str x14, [sp, #-16]!")
+
+    # Load element
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")
+    self._emit("    add x9, x9, #16")
+    self._emit("    ldr x0, [x9, x14, lsl #3]")
+    self._emit("    str x0, [sp, #-16]!")  # Save element for potential copy
+
+    # Call predicate
+    # Stack: [elem] [idx] [new_vec] [len] [closure] = sp+0, sp+16, sp+32, sp+48, sp+64
+    self._emit("    ldr x9, [sp, #64]")  # Closure pointer
+    self._emit("    blr x9")
+
+    # Check result
+    self._emit("    cmp x0, #0")
+    self._emit(f"    b.eq {filter_skip}")
+
+    # Element matches - add to dest
+    # Stack: [elem] [idx] [new_vec] [len] [closure] = sp+0, sp+16, sp+32, sp+48, sp+64
+    self._emit("    ldr x0, [sp]")  # Element value (sp+0)
+    self._emit("    ldr x13, [sp, #32]")  # New vec (sp+32)
+    self._emit("    ldr x11, [x13, #8]")  # Current dest length
+    self._emit("    add x12, x13, #16")  # Dest data
+    self._emit("    str x0, [x12, x11, lsl #3]")
+    self._emit("    add x11, x11, #1")
+    self._emit("    str x11, [x13, #8]")  # Update length
+
+    self._emit(f"{filter_skip}:")
+    self._emit("    add sp, sp, #16")  # Pop element
+    self._emit("    ldr x14, [sp], #16")  # Restore index
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {filter_loop}")
+
+    self._emit(f"{filter_done}:")
+    self._emit("    ldr x0, [sp], #16")  # Return new vec
+    self._emit("    add sp, sp, #16")  # Pop length
+    self._emit("    add sp, sp, #16")  # Pop closure
+
+  def _gen_vec_sum(self, src_offset: int) -> None:
+    """Generate code for vec.sum() - returns sum of all elements."""
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")  # Vec base
+    self._emit("    ldr x10, [x9, #8]")  # Length
+    self._emit("    add x9, x9, #16")  # Data start
+    self._emit("    mov x0, #0")  # Accumulator
+    self._emit("    mov x11, #0")  # Counter
+
+    sum_loop = self._new_label("sum_loop")
+    sum_done = self._new_label("sum_done")
+    self._emit(f"{sum_loop}:")
+    self._emit("    cmp x11, x10")
+    self._emit(f"    b.ge {sum_done}")
+    self._emit("    ldr x12, [x9, x11, lsl #3]")
+    self._emit("    add x0, x0, x12")
+    self._emit("    add x11, x11, #1")
+    self._emit(f"    b {sum_loop}")
+    self._emit(f"{sum_done}:")
+
+  def _gen_vec_fold(self, src_offset: int, init_expr: Expr, closure_expr: Expr) -> None:
+    """Generate code for vec.fold(init, closure) - reduces to single value."""
+    # Evaluate initial value
+    self._gen_expr(init_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Save accumulator
+
+    # Evaluate closure
+    self._gen_expr(closure_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Save closure
+
+    # Load source info
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")
+    self._emit("    ldr x10, [x9, #8]")  # Length
+    self._emit("    str x10, [sp, #-16]!")  # Save length
+
+    # Fold loop
+    self._emit("    mov x14, #0")  # Index
+    fold_loop = self._new_label("fold_loop")
+    fold_done = self._new_label("fold_done")
+    self._emit(f"{fold_loop}:")
+    self._emit("    ldr x10, [sp]")  # Length
+    self._emit("    cmp x14, x10")
+    self._emit(f"    b.ge {fold_done}")
+
+    # Save index
+    self._emit("    str x14, [sp, #-16]!")
+
+    # Call closure(acc, elem)
+    # Stack: [idx] [len] [closure] [acc] = sp+0, sp+16, sp+32, sp+48
+    self._emit("    ldr x0, [sp, #48]")  # Accumulator
+    self._emit(f"    ldr x9, [x29, #{src_offset}]")
+    self._emit("    add x9, x9, #16")
+    self._emit("    ldr x1, [x9, x14, lsl #3]")  # Element
+    self._emit("    ldr x9, [sp, #32]")  # Closure
+    self._emit("    blr x9")
+
+    # Update accumulator
+    self._emit("    str x0, [sp, #48]")
+
+    # Restore index and continue
+    self._emit("    ldr x14, [sp], #16")
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {fold_loop}")
+
+    self._emit(f"{fold_done}:")
+    self._emit("    add sp, sp, #16")  # Pop length
+    self._emit("    add sp, sp, #16")  # Pop closure
+    self._emit("    ldr x0, [sp], #16")  # Return accumulator
+
+  # === Vec methods that work with pointer on stack (for chaining) ===
+
+  def _gen_vec_skip_from_ptr(self, skip_expr: Expr) -> None:
+    """Generate skip() when vec pointer is on stack."""
+    # Stack: [vec_ptr]
+    self._gen_expr(skip_expr)
+    self._emit("    mov x11, x0")  # Skip count in x11
+
+    # Load source vec info
+    self._emit("    ldr x9, [sp]")  # Source base (keep on stack for now)
+    self._emit("    ldr x10, [x9, #8]")  # Source length
+
+    # Calculate new length = max(0, len - skip)
+    self._emit("    subs x12, x10, x11")
+    skip_neg = self._new_label("skip_neg")
+    skip_cont = self._new_label("skip_cont")
+    self._emit(f"    b.lt {skip_neg}")
+    self._emit(f"    b {skip_cont}")
+    self._emit(f"{skip_neg}:")
+    self._emit("    mov x12, #0")
+    self._emit(f"{skip_cont}:")
+
+    # Save new_len and skip
+    self._emit("    str x12, [sp, #-16]!")  # new_len
+    self._emit("    str x11, [sp, #-16]!")  # skip
+
+    # Allocate new vec
+    self._emit("    add x0, x12, #2")
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    bl _malloc")
+
+    # Set up header
+    self._emit("    ldr x11, [sp], #16")  # skip
+    self._emit("    ldr x12, [sp], #16")  # new_len
+    self._emit("    str x12, [x0]")  # capacity
+    self._emit("    str x12, [x0, #8]")  # length
+
+    # Copy elements
+    self._emit("    ldr x9, [sp], #16")  # Source vec (and remove from stack)
+    self._emit("    add x9, x9, #16")  # Source data
+    self._emit("    add x9, x9, x11, lsl #3")  # + skip offset
+    self._emit("    add x13, x0, #16")  # Dest data
+    self._emit("    mov x14, #0")
+
+    copy_loop = self._new_label("skip_copy")
+    copy_done = self._new_label("skip_done")
+    self._emit(f"{copy_loop}:")
+    self._emit("    cmp x14, x12")
+    self._emit(f"    b.ge {copy_done}")
+    self._emit("    ldr x15, [x9, x14, lsl #3]")
+    self._emit("    str x15, [x13, x14, lsl #3]")
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {copy_loop}")
+    self._emit(f"{copy_done}:")
+
+  def _gen_vec_take_from_ptr(self, take_expr: Expr) -> None:
+    """Generate take() when vec pointer is on stack."""
+    self._gen_expr(take_expr)
+    self._emit("    mov x11, x0")  # Take count
+
+    self._emit("    ldr x9, [sp]")  # Source vec
+    self._emit("    ldr x10, [x9, #8]")  # Length
+
+    # new_len = min(len, take)
+    self._emit("    cmp x10, x11")
+    take_min = self._new_label("take_min")
+    take_done2 = self._new_label("take_d")
+    self._emit(f"    b.lt {take_min}")
+    self._emit("    mov x12, x11")
+    self._emit(f"    b {take_done2}")
+    self._emit(f"{take_min}:")
+    self._emit("    mov x12, x10")
+    self._emit(f"{take_done2}:")
+
+    # Save new_len
+    self._emit("    str x12, [sp, #-16]!")
+
+    # Allocate
+    self._emit("    add x0, x12, #2")
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    bl _malloc")
+
+    # Set header
+    self._emit("    ldr x12, [sp], #16")
+    self._emit("    str x12, [x0]")
+    self._emit("    str x12, [x0, #8]")
+
+    # Copy
+    self._emit("    ldr x9, [sp], #16")  # Source vec
+    self._emit("    add x9, x9, #16")
+    self._emit("    add x13, x0, #16")
+    self._emit("    mov x14, #0")
+
+    copy_loop = self._new_label("take_copy")
+    copy_done = self._new_label("take_done")
+    self._emit(f"{copy_loop}:")
+    self._emit("    cmp x14, x12")
+    self._emit(f"    b.ge {copy_done}")
+    self._emit("    ldr x15, [x9, x14, lsl #3]")
+    self._emit("    str x15, [x13, x14, lsl #3]")
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {copy_loop}")
+    self._emit(f"{copy_done}:")
+
+  def _gen_vec_map_from_ptr(self, closure_expr: Expr) -> None:
+    """Generate map() when vec pointer is on stack."""
+    # Stack: [vec_ptr]
+    self._gen_expr(closure_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Stack: [closure, vec_ptr]
+
+    self._emit("    ldr x9, [sp, #16]")  # Vec ptr
+    self._emit("    ldr x10, [x9, #8]")  # Length
+    self._emit("    str x10, [sp, #-16]!")  # Stack: [len, closure, vec_ptr]
+
+    # Allocate
+    self._emit("    add x0, x10, #2")
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    bl _malloc")
+    self._emit("    str x0, [sp, #-16]!")  # Stack: [new_vec, len, closure, vec_ptr]
+
+    # Header
+    self._emit("    ldr x10, [sp, #16]")  # len
+    self._emit("    str x10, [x0]")
+    self._emit("    str x10, [x0, #8]")
+
+    # Map loop
+    self._emit("    mov x14, #0")
+    map_loop = self._new_label("map_loop")
+    map_done = self._new_label("map_done")
+    self._emit(f"{map_loop}:")
+    self._emit("    ldr x10, [sp, #16]")
+    self._emit("    cmp x14, x10")
+    self._emit(f"    b.ge {map_done}")
+
+    self._emit("    str x14, [sp, #-16]!")  # Save index
+
+    # Load element
+    # Stack: [idx] [new_vec] [len] [closure] [vec_ptr] = sp+0, sp+16, sp+32, sp+48, sp+64
+    self._emit("    ldr x9, [sp, #64]")  # vec_ptr
+    self._emit("    add x9, x9, #16")
+    self._emit("    ldr x0, [x9, x14, lsl #3]")
+
+    # Call closure
+    self._emit("    ldr x9, [sp, #48]")  # closure
+    self._emit("    blr x9")
+
+    # Store result
+    self._emit("    ldr x14, [sp], #16")
+    self._emit("    ldr x13, [sp]")  # new_vec
+    self._emit("    add x13, x13, #16")
+    self._emit("    str x0, [x13, x14, lsl #3]")
+
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {map_loop}")
+    self._emit(f"{map_done}:")
+
+    self._emit("    ldr x0, [sp], #16")  # new_vec
+    self._emit("    add sp, sp, #16")  # len
+    self._emit("    add sp, sp, #16")  # closure
+    self._emit("    add sp, sp, #16")  # vec_ptr
+
+  def _gen_vec_filter_from_ptr(self, closure_expr: Expr) -> None:
+    """Generate filter() when vec pointer is on stack."""
+    self._gen_expr(closure_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Stack: [closure, vec_ptr]
+
+    self._emit("    ldr x9, [sp, #16]")
+    self._emit("    ldr x10, [x9, #8]")  # len
+    self._emit("    str x10, [sp, #-16]!")  # Stack: [len, closure, vec_ptr]
+
+    # Allocate (max capacity = original len)
+    self._emit("    add x0, x10, #2")
+    self._emit("    lsl x0, x0, #3")
+    self._emit("    bl _malloc")
+    self._emit("    str x0, [sp, #-16]!")  # Stack: [new_vec, len, closure, vec_ptr]
+
+    # Init header
+    self._emit("    ldr x10, [sp, #16]")
+    self._emit("    str x10, [x0]")  # capacity
+    self._emit("    str xzr, [x0, #8]")  # length = 0
+
+    # Filter loop
+    self._emit("    mov x14, #0")
+    filter_loop = self._new_label("filter_loop")
+    filter_done = self._new_label("filter_done")
+    filter_skip = self._new_label("filter_skip")
+    self._emit(f"{filter_loop}:")
+    self._emit("    ldr x10, [sp, #16]")
+    self._emit("    cmp x14, x10")
+    self._emit(f"    b.ge {filter_done}")
+
+    self._emit("    str x14, [sp, #-16]!")  # Save index
+
+    # Load element
+    # Stack after index push: [idx] [new_vec] [len] [closure] [vec_ptr] = sp+0, sp+16, sp+32, sp+48, sp+64
+    self._emit("    ldr x9, [sp, #64]")  # vec_ptr
+    self._emit("    add x9, x9, #16")
+    self._emit("    ldr x0, [x9, x14, lsl #3]")
+    self._emit("    str x0, [sp, #-16]!")  # Save element
+
+    # Call predicate
+    # Stack: [elem] [idx] [new_vec] [len] [closure] [vec_ptr] = sp+0, sp+16, sp+32, sp+48, sp+64, sp+80
+    self._emit("    ldr x9, [sp, #64]")  # closure
+    self._emit("    blr x9")
+
+    # Check
+    self._emit("    cmp x0, #0")
+    self._emit(f"    b.eq {filter_skip}")
+
+    # Add to result
+    # Stack: [elem] [idx] [new_vec] [len] [closure] [vec_ptr] = sp+0, sp+16, sp+32, sp+48, sp+64, sp+80
+    self._emit("    ldr x0, [sp]")  # element (sp+0)
+    self._emit("    ldr x13, [sp, #32]")  # new_vec (sp+32)
+    self._emit("    ldr x11, [x13, #8]")  # current len
+    self._emit("    add x12, x13, #16")
+    self._emit("    str x0, [x12, x11, lsl #3]")
+    self._emit("    add x11, x11, #1")
+    self._emit("    str x11, [x13, #8]")
+
+    self._emit(f"{filter_skip}:")
+    self._emit("    add sp, sp, #16")  # element
+    self._emit("    ldr x14, [sp], #16")  # index
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {filter_loop}")
+
+    self._emit(f"{filter_done}:")
+    self._emit("    ldr x0, [sp], #16")  # new_vec
+    self._emit("    add sp, sp, #16")  # len
+    self._emit("    add sp, sp, #16")  # closure
+    self._emit("    add sp, sp, #16")  # vec_ptr
+
+  def _gen_vec_sum_from_ptr(self) -> None:
+    """Generate sum() when vec pointer is on stack."""
+    self._emit("    ldr x9, [sp], #16")  # Vec ptr
+    self._emit("    ldr x10, [x9, #8]")  # Length
+    self._emit("    add x9, x9, #16")  # Data
+    self._emit("    mov x0, #0")  # Sum
+    self._emit("    mov x11, #0")  # Counter
+
+    sum_loop = self._new_label("sum_loop")
+    sum_done = self._new_label("sum_done")
+    self._emit(f"{sum_loop}:")
+    self._emit("    cmp x11, x10")
+    self._emit(f"    b.ge {sum_done}")
+    self._emit("    ldr x12, [x9, x11, lsl #3]")
+    self._emit("    add x0, x0, x12")
+    self._emit("    add x11, x11, #1")
+    self._emit(f"    b {sum_loop}")
+    self._emit(f"{sum_done}:")
+
+  def _gen_vec_fold_from_ptr(self, init_expr: Expr, closure_expr: Expr) -> None:
+    """Generate fold() when vec pointer is on stack."""
+    # Stack: [vec_ptr]
+    self._gen_expr(init_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Stack: [acc, vec_ptr]
+
+    self._gen_expr(closure_expr)
+    self._emit("    str x0, [sp, #-16]!")  # Stack: [closure, acc, vec_ptr]
+
+    self._emit("    ldr x9, [sp, #32]")  # vec_ptr
+    self._emit("    ldr x10, [x9, #8]")  # len
+    self._emit("    str x10, [sp, #-16]!")  # Stack: [len, closure, acc, vec_ptr]
+
+    # Fold loop
+    self._emit("    mov x14, #0")
+    fold_loop = self._new_label("fold_loop")
+    fold_done = self._new_label("fold_done")
+    self._emit(f"{fold_loop}:")
+    self._emit("    ldr x10, [sp]")
+    self._emit("    cmp x14, x10")
+    self._emit(f"    b.ge {fold_done}")
+
+    self._emit("    str x14, [sp, #-16]!")
+
+    # closure(acc, elem)
+    # Stack: [idx] [len] [closure] [acc] [vec_ptr] = sp+0, sp+16, sp+32, sp+48, sp+64
+    self._emit("    ldr x0, [sp, #48]")  # acc
+    self._emit("    ldr x9, [sp, #64]")  # vec_ptr
+    self._emit("    add x9, x9, #16")
+    self._emit("    ldr x1, [x9, x14, lsl #3]")  # elem
+    self._emit("    ldr x9, [sp, #32]")  # closure
+    self._emit("    blr x9")
+
+    # Update acc
+    self._emit("    str x0, [sp, #48]")
+
+    self._emit("    ldr x14, [sp], #16")
+    self._emit("    add x14, x14, #1")
+    self._emit(f"    b {fold_loop}")
+
+    self._emit(f"{fold_done}:")
+    self._emit("    add sp, sp, #16")  # len
+    self._emit("    add sp, sp, #16")  # closure
+    self._emit("    ldr x0, [sp], #16")  # acc
+    self._emit("    add sp, sp, #16")  # vec_ptr
 
   def _gen_match(self, target: Expr, arms: tuple[MatchArm, ...]) -> None:
     """Generate code for a match expression."""

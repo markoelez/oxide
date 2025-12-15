@@ -2468,3 +2468,142 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 42
+
+  # === Vec Iterator Methods Tests ===
+
+  def test_vec_skip(self):
+    """Test vec.skip(n) method."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    v.push(5)
+    let v2: vec[i64] = v.skip(2)
+    v2[0] + v2[1] + v2[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 12  # 3 + 4 + 5
+
+  def test_vec_take(self):
+    """Test vec.take(n) method."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    v.push(5)
+    let v2: vec[i64] = v.take(3)
+    v2[0] + v2[1] + v2[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 6  # 1 + 2 + 3
+
+  def test_vec_skip_take_chain(self):
+    """Test chaining skip and take."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    for i in range(0, 10):
+        v.push(i)
+    let v2: vec[i64] = v.skip(3).take(4)
+    v2[0] + v2[1] + v2[2] + v2[3]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 18  # 3 + 4 + 5 + 6
+
+  def test_vec_into_iter_collect(self):
+    """Test into_iter and collect as no-ops."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    let v2: vec[i64] = v.into_iter().collect()
+    v2[0] + v2[1] + v2[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 6
+
+  def test_vec_map(self):
+    """Test vec.map() with closure."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    let doubled: vec[i64] = v.map(|x: i64| -> i64: x * 2)
+    doubled[0] + doubled[1] + doubled[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 12  # 2 + 4 + 6
+
+  def test_vec_filter(self):
+    """Test vec.filter() with closure."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    v.push(5)
+    v.push(6)
+    let evens: vec[i64] = v.filter(|x: i64| -> bool: x % 2 == 0)
+    evens[0] + evens[1] + evens[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 12  # 2 + 4 + 6
+
+  def test_vec_sum(self):
+    """Test vec.sum() method."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    v.push(5)
+    v.sum()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 15
+
+  def test_vec_fold(self):
+    """Test vec.fold() with closure."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    v.fold(0, |acc: i64, x: i64| -> i64: acc + x)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 10
+
+  def test_vec_map_filter_chain(self):
+    """Test chaining map and filter."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v.push(4)
+    v.push(5)
+    let result: vec[i64] = v.map(|x: i64| -> i64: x * 2).filter(|x: i64| -> bool: x > 5)
+    result.sum()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 24  # 6 + 8 + 10
+
+  def test_vec_full_chain(self):
+    """Test Rust-style iterator chain: skip, take, map, filter, sum."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = []
+    for i in range(0, 10):
+        v.push(i)
+    v.into_iter().skip(2).take(5).map(|x: i64| -> i64: x * 10).filter(|x: i64| -> bool: x > 30).sum()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 150  # 40 + 50 + 60

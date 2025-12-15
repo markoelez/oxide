@@ -64,18 +64,23 @@ fn main() -> i64:
     0  # Implicit return
 ```
 
-**Python-style Keyword Arguments:**
+**Functional Iterator Methods:**
 ```
-fn greet(name: i64, count: i64) -> i64:
-    name * count  # Implicit return
-
 fn main() -> i64:
-    greet(10, 5)             # Positional
-    greet(count=5, name=10)  # Keyword (any order)
-    greet(10, count=5)       # Mixed
+    let v: vec[i64] = []
+    for i in range(0, 10):
+        v.push(i)
+    
+    # Rust-style method chaining
+    let result: vec[i64] = v.into_iter().skip(2).take(5).map(|x: i64| -> i64: x * 2).filter(|x: i64| -> bool: x > 5).collect()
+    print(result.sum())  # 36
+    
+    # Fold for reductions
+    let factorial: i64 = v.take(5).fold(1, |acc: i64, x: i64| -> i64: acc * x)
+    0
 ```
 
-**Supported:** implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures, `if`/`else`, `while`, `for i in range()`, references `&T`/`&mut T`.
+**Supported:** functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture

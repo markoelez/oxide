@@ -26,6 +26,7 @@ examples/impl
 examples/references
 examples/closures
 examples/kwargs
+examples/iterators
 
 # uv lock file
 uv.lock

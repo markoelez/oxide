@@ -1,5 +1,7 @@
 # Vibec
 
+[![CI](https://github.com/markoelez/vibec/actions/workflows/ci.yml/badge.svg)](https://github.com/markoelez/vibec/actions/workflows/ci.yml)
+
 A toy compiled programming language with Python/Rust hybrid syntax, targeting ARM64 macOS.
 
 ## Language Features
@@ -44,7 +46,7 @@ fn main() -> i64:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/vibec.git
+git clone https://github.com/markoelez/vibec.git
 cd vibec
 
 # Create virtual environment and install

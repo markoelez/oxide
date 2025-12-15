@@ -71,56 +71,6 @@ vibec source.vb --emit-asm
 vibec source.vb --keep-asm
 ```
 
-## Examples
-
-### Hello World (exit code)
-
-```
-fn main() -> i64:
-    return 42
-```
-
-```bash
-$ vibec hello.vb && ./hello; echo $?
-42
-```
-
-### Factorial
-
-```
-fn factorial(n: i64) -> i64:
-    if n <= 1:
-        return 1
-    return n * factorial(n - 1)
-
-fn main() -> i64:
-    print(factorial(5))
-    return 0
-```
-
-```bash
-$ vibec factorial.vb && ./factorial
-120
-```
-
-### Fibonacci
-
-```
-fn fib(n: i64) -> i64:
-    if n <= 1:
-        return n
-    return fib(n - 1) + fib(n - 2)
-
-fn main() -> i64:
-    print(fib(10))
-    return 0
-```
-
-```bash
-$ vibec fibonacci.vb && ./fibonacci
-55
-```
-
 ## Architecture
 
 The compiler is structured as a clean pipeline:

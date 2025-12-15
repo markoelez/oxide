@@ -60,7 +60,7 @@ class TestLexer:
     assert TokenType.GE in types
 
   def test_keywords(self):
-    source = "fn let struct impl enum match self if else while for in range return and or not true false"
+    source = "fn let struct impl enum match self if elif else while for in range return and or not true false"
     tokens = tokenize(source)
     types = [t.type for t in tokens]
     assert TokenType.FN in types
@@ -71,6 +71,7 @@ class TestLexer:
     assert TokenType.MATCH in types
     assert TokenType.SELF in types
     assert TokenType.IF in types
+    assert TokenType.ELIF in types
     assert TokenType.ELSE in types
     assert TokenType.WHILE in types
     assert TokenType.FOR in types
@@ -198,6 +199,57 @@ class TestParser:
     from vibec.ast import IfStmt
 
     assert isinstance(ast.functions[0].body[0], IfStmt)
+
+  def test_elif_statement(self):
+    source = """fn main() -> i64:
+    let x: i64 = 5
+    if x < 0:
+        return 0
+    elif x == 0:
+        return 1
+    elif x > 0:
+        return 2
+    return 3
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import IfStmt
+
+    # First if
+    if_stmt = ast.functions[0].body[1]
+    assert isinstance(if_stmt, IfStmt)
+    # Should have else_body which contains another IfStmt (the elif)
+    assert if_stmt.else_body is not None
+    assert len(if_stmt.else_body) == 1
+    elif_stmt = if_stmt.else_body[0]
+    assert isinstance(elif_stmt, IfStmt)
+    # Second elif
+    assert elif_stmt.else_body is not None
+    assert isinstance(elif_stmt.else_body[0], IfStmt)
+
+  def test_elif_else_statement(self):
+    source = """fn main() -> i64:
+    let x: i64 = 5
+    if x < 0:
+        return 0
+    elif x == 0:
+        return 1
+    else:
+        return 2
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import IfStmt, ReturnStmt
+
+    if_stmt = ast.functions[0].body[1]
+    assert isinstance(if_stmt, IfStmt)
+    # elif is nested if in else
+    assert if_stmt.else_body is not None
+    elif_stmt = if_stmt.else_body[0]
+    assert isinstance(elif_stmt, IfStmt)
+    # else body of elif should have return statement
+    assert elif_stmt.else_body is not None
+    assert isinstance(elif_stmt.else_body[0], ReturnStmt)
 
   def test_while_statement(self):
     source = """fn main() -> i64:
@@ -2043,3 +2095,80 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 1
+
+  # === Elif tests ===
+
+  def test_elif_basic(self):
+    """Test basic elif chain."""
+    source = """fn main() -> i64:
+    let x: i64 = 5
+    if x < 0:
+        return 1
+    elif x == 0:
+        return 2
+    elif x > 0:
+        return 3
+    return 4
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 3
+
+  def test_elif_first_branch(self):
+    """Test elif when first condition is true."""
+    source = """fn main() -> i64:
+    let x: i64 = 0
+    if x < 5:
+        return 10
+    elif x == 5:
+        return 20
+    else:
+        return 30
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 10
+
+  def test_elif_middle_branch(self):
+    """Test elif when middle condition is true."""
+    source = """fn main() -> i64:
+    let x: i64 = 5
+    if x < 5:
+        return 10
+    elif x == 5:
+        return 20
+    else:
+        return 30
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 20
+
+  def test_elif_else_branch(self):
+    """Test elif falling through to else."""
+    source = """fn main() -> i64:
+    let x: i64 = 10
+    if x < 5:
+        return 10
+    elif x == 5:
+        return 20
+    else:
+        return 30
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30
+
+  def test_elif_many_branches(self):
+    """Test elif with many branches."""
+    source = """fn main() -> i64:
+    let x: i64 = 3
+    if x == 1:
+        return 10
+    elif x == 2:
+        return 20
+    elif x == 3:
+        return 30
+    elif x == 4:
+        return 40
+    else:
+        return 50
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30

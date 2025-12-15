@@ -430,7 +430,7 @@ class Parser:
     return ReturnStmt(value)
 
   def _parse_if(self) -> IfStmt:
-    """Parse: if cond: INDENT body DEDENT [else: INDENT body DEDENT]"""
+    """Parse: if cond: INDENT body DEDENT [elif cond: INDENT body DEDENT]* [else: INDENT body DEDENT]"""
     self._advance()  # consume 'if'
     condition = self._parse_expression()
     self._expect(TokenType.COLON, "Expected ':'")
@@ -440,7 +440,34 @@ class Parser:
     else_body: tuple[Stmt, ...] | None = None
     self._skip_newlines()
 
-    if self._check(TokenType.ELSE):
+    if self._check(TokenType.ELIF):
+      # elif is syntactic sugar for else: if ...
+      # Parse the elif as a nested if statement
+      elif_stmt = self._parse_elif()
+      else_body = (elif_stmt,)
+    elif self._check(TokenType.ELSE):
+      self._advance()
+      self._expect(TokenType.COLON, "Expected ':' after else")
+      self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+      else_body = tuple(self._parse_block())
+
+    return IfStmt(condition, tuple(then_body), else_body)
+
+  def _parse_elif(self) -> IfStmt:
+    """Parse: elif cond: INDENT body DEDENT [elif ...]* [else: ...]"""
+    self._advance()  # consume 'elif'
+    condition = self._parse_expression()
+    self._expect(TokenType.COLON, "Expected ':'")
+    self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+    then_body = self._parse_block()
+
+    else_body: tuple[Stmt, ...] | None = None
+    self._skip_newlines()
+
+    if self._check(TokenType.ELIF):
+      elif_stmt = self._parse_elif()
+      else_body = (elif_stmt,)
+    elif self._check(TokenType.ELSE):
       self._advance()
       self._expect(TokenType.COLON, "Expected ':' after else")
       self._expect(TokenType.NEWLINE, "Expected newline after ':'")

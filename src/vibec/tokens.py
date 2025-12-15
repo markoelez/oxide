@@ -15,6 +15,7 @@ class TokenType(Enum):
   SELF = auto()
   MUT = auto()
   IF = auto()
+  ELIF = auto()
   ELSE = auto()
   WHILE = auto()
   FOR = auto()
@@ -85,6 +86,7 @@ KEYWORDS: dict[str, TokenType] = {
   "self": TokenType.SELF,
   "mut": TokenType.MUT,
   "if": TokenType.IF,
+  "elif": TokenType.ELIF,
   "else": TokenType.ELSE,
   "while": TokenType.WHILE,
   "for": TokenType.FOR,

@@ -11,6 +11,9 @@ class TokenType(Enum):
   IF = auto()
   ELSE = auto()
   WHILE = auto()
+  FOR = auto()
+  IN = auto()
+  RANGE = auto()
   RETURN = auto()
   AND = auto()
   OR = auto()
@@ -63,6 +66,9 @@ KEYWORDS: dict[str, TokenType] = {
   "if": TokenType.IF,
   "else": TokenType.ELSE,
   "while": TokenType.WHILE,
+  "for": TokenType.FOR,
+  "in": TokenType.IN,
+  "range": TokenType.RANGE,
   "return": TokenType.RETURN,
   "and": TokenType.AND,
   "or": TokenType.OR,

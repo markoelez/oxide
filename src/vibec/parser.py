@@ -4,6 +4,7 @@ from .ast import (
   Expr,
   Stmt,
   IfStmt,
+  ForStmt,
   LetStmt,
   Program,
   VarExpr,
@@ -188,6 +189,8 @@ class Parser:
       return self._parse_if()
     elif self._check(TokenType.WHILE):
       return self._parse_while()
+    elif self._check(TokenType.FOR):
+      return self._parse_for()
     elif self._check(TokenType.IDENT) and self._peek().type == TokenType.ASSIGN:
       return self._parse_assign()
     else:
@@ -246,6 +249,30 @@ class Parser:
     self._expect(TokenType.NEWLINE, "Expected newline after ':'")
     body = self._parse_block()
     return WhileStmt(condition, tuple(body))
+
+  def _parse_for(self) -> ForStmt:
+    """Parse: for var in range(end): or for var in range(start, end):"""
+    self._advance()  # consume 'for'
+    var_token = self._expect(TokenType.IDENT, "Expected loop variable")
+    self._expect(TokenType.IN, "Expected 'in'")
+    self._expect(TokenType.RANGE, "Expected 'range'")
+    self._expect(TokenType.LPAREN, "Expected '('")
+
+    # Parse range arguments: range(end) or range(start, end)
+    first = self._parse_expression()
+    if self._check(TokenType.COMMA):
+      self._advance()
+      start = first
+      end = self._parse_expression()
+    else:
+      start = IntLiteral(0)
+      end = first
+
+    self._expect(TokenType.RPAREN, "Expected ')'")
+    self._expect(TokenType.COLON, "Expected ':'")
+    self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+    body = self._parse_block()
+    return ForStmt(var_token.value, start, end, tuple(body))
 
   def _parse_expr_stmt(self) -> ExprStmt:
     """Parse an expression statement."""

@@ -60,7 +60,7 @@ class TestLexer:
     assert TokenType.GE in types
 
   def test_keywords(self):
-    source = "fn let if else while return and or not true false"
+    source = "fn let if else while for in range return and or not true false"
     tokens = tokenize(source)
     types = [t.type for t in tokens]
     assert TokenType.FN in types
@@ -68,6 +68,9 @@ class TestLexer:
     assert TokenType.IF in types
     assert TokenType.ELSE in types
     assert TokenType.WHILE in types
+    assert TokenType.FOR in types
+    assert TokenType.IN in types
+    assert TokenType.RANGE in types
     assert TokenType.RETURN in types
     assert TokenType.AND in types
     assert TokenType.OR in types
@@ -174,6 +177,34 @@ class TestParser:
     assert isinstance(ast.functions[0].body[1], AssignStmt)
     assert ast.functions[0].body[1].name == "x"
 
+  def test_for_loop(self):
+    source = """fn main() -> i64:
+    for i in range(5):
+        print(i)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import ForStmt
+
+    assert isinstance(ast.functions[0].body[0], ForStmt)
+    assert ast.functions[0].body[0].var == "i"
+
+  def test_for_loop_with_start(self):
+    source = """fn main() -> i64:
+    for i in range(2, 5):
+        print(i)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import ForStmt, IntLiteral
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, ForStmt)
+    assert isinstance(stmt.start, IntLiteral)
+    assert stmt.start.value == 2
+
 
 class TestChecker:
   def test_type_mismatch(self):
@@ -278,6 +309,29 @@ class TestChecker:
   def test_assignment_undefined_variable(self):
     source = """fn main() -> i64:
     x = 1
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_for_loop_valid(self):
+    source = """fn main() -> i64:
+    for i in range(10):
+        print(i)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_for_loop_invalid_start(self):
+    source = """fn main() -> i64:
+    for i in range(true, 10):
+        print(i)
     return 0
 """
     tokens = tokenize(source)
@@ -431,3 +485,44 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 5
+
+  def test_for_loop_simple(self):
+    source = """fn main() -> i64:
+    let sum: i64 = 0
+    for i in range(5):
+        sum = sum + i
+    return sum
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 10  # 0 + 1 + 2 + 3 + 4 = 10
+
+  def test_for_loop_with_start(self):
+    source = """fn main() -> i64:
+    let sum: i64 = 0
+    for i in range(2, 5):
+        sum = sum + i
+    return sum
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 9  # 2 + 3 + 4 = 9
+
+  def test_for_loop_print(self):
+    source = """fn main() -> i64:
+    for i in range(3):
+        print(i)
+    return 0
+"""
+    exit_code, stdout = self._compile_and_run(source)
+    assert exit_code == 0
+    assert stdout.strip() == "0\n1\n2"
+
+  def test_for_loop_nested(self):
+    source = """fn main() -> i64:
+    let count: i64 = 0
+    for i in range(3):
+        for j in range(4):
+            count = count + 1
+    return count
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 12  # 3 * 4 = 12

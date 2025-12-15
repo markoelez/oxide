@@ -123,8 +123,18 @@ class AssignStmt:
   value: Expr
 
 
+@dataclass(frozen=True, slots=True)
+class ForStmt:
+  """For loop: for i in range(start, end): body"""
+
+  var: str
+  start: Expr
+  end: Expr
+  body: tuple["Stmt", ...]
+
+
 # Statement union type
-Stmt = LetStmt | AssignStmt | ReturnStmt | ExprStmt | IfStmt | WhileStmt
+Stmt = LetStmt | AssignStmt | ReturnStmt | ExprStmt | IfStmt | WhileStmt | ForStmt
 
 
 # === Top-level Definitions ===

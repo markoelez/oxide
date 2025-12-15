@@ -16,6 +16,8 @@ examples/factorial
 examples/fibonacci
 examples/hello
 examples/strings
+examples/loops
+examples/counter
 
 # uv lock file
 uv.lock

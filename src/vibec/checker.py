@@ -6,6 +6,7 @@ from .ast import (
   Expr,
   Stmt,
   IfStmt,
+  ForStmt,
   LetStmt,
   Program,
   VarExpr,
@@ -160,6 +161,21 @@ class TypeChecker:
           raise TypeError(f"While condition must be bool, got {cond_type}")
 
         self._enter_scope()
+        for s in body:
+          self._check_stmt(s)
+        self._exit_scope()
+
+      case ForStmt(var, start, end, body):
+        start_type = self._check_expr(start)
+        if start_type != "i64":
+          raise TypeError(f"For loop start must be i64, got {start_type}")
+
+        end_type = self._check_expr(end)
+        if end_type != "i64":
+          raise TypeError(f"For loop end must be i64, got {end_type}")
+
+        self._enter_scope()
+        self._define_var(var, "i64")
         for s in body:
           self._check_stmt(s)
         self._exit_scope()

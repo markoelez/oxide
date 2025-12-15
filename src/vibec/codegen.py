@@ -4,6 +4,7 @@ from .ast import (
   Expr,
   Stmt,
   IfStmt,
+  ForStmt,
   LetStmt,
   Program,
   VarExpr,
@@ -106,6 +107,10 @@ class CodeGenerator:
         case WhileStmt(condition, body):
           self._collect_strings_from_expr(condition)
           self._collect_strings_from_stmts(body)
+        case ForStmt(_, start, end, body):
+          self._collect_strings_from_expr(start)
+          self._collect_strings_from_expr(end)
+          self._collect_strings_from_stmts(body)
 
   def _collect_strings_from_expr(self, expr: Expr) -> None:
     """Collect strings from an expression."""
@@ -163,6 +168,9 @@ class CodeGenerator:
           if else_body:
             count += self._count_locals(else_body)
         case WhileStmt(_, body):
+          count += self._count_locals(body)
+        case ForStmt(_, _, _, body):
+          count += 2  # Loop variable + end value temp
           count += self._count_locals(body)
     return count
 
@@ -276,6 +284,44 @@ class CodeGenerator:
         # Loop body
         for s in body:
           self._gen_stmt(s)
+        self._emit(f"    b {loop_label}")
+
+        self._emit(f"{end_label}:")
+
+      case ForStmt(var, start, end, body):
+        loop_label = self._new_label("for")
+        end_label = self._new_label("endfor")
+
+        # Allocate loop variable slot
+        offset = -16 - (self.next_slot * 8)
+        self.locals[var] = (offset, "i64")
+        self.next_slot += 1
+
+        # Initialize loop variable with start value
+        self._gen_expr(start)
+        self._emit(f"    str x0, [x29, #{offset}]")
+
+        # Store end value in a temp slot
+        end_offset = -16 - (self.next_slot * 8)
+        self.next_slot += 1
+        self._gen_expr(end)
+        self._emit(f"    str x0, [x29, #{end_offset}]")
+
+        self._emit(f"{loop_label}:")
+        # Check: loop_var < end
+        self._emit(f"    ldr x0, [x29, #{offset}]")
+        self._emit(f"    ldr x1, [x29, #{end_offset}]")
+        self._emit("    cmp x0, x1")
+        self._emit(f"    b.ge {end_label}")
+
+        # Loop body
+        for s in body:
+          self._gen_stmt(s)
+
+        # Increment loop variable
+        self._emit(f"    ldr x0, [x29, #{offset}]")
+        self._emit("    add x0, x0, #1")
+        self._emit(f"    str x0, [x29, #{offset}]")
         self._emit(f"    b {loop_label}")
 
         self._emit(f"{end_label}:")

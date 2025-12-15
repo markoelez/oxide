@@ -20,29 +20,6 @@ fn main() -> i64:
     return 0
 ```
 
-### Syntax
-
-- `fn` keyword for functions with `-> ReturnType`
-- `let` for variable declarations with explicit types
-- Python-style indentation for blocks (no braces)
-- Colons to start blocks
-
-### Supported Types
-
-- `i64` - 64-bit signed integer
-- `bool` - boolean (`true` / `false`)
-- `str` - string literals with escape sequences
-
-### Supported Constructs
-
-- Functions with parameters and return values
-- Variables with `let`
-- Arithmetic: `+`, `-`, `*`, `/`, `%`
-- Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`
-- Logical: `and`, `or`, `not`
-- Control flow: `if`/`else`, `while`
-- Built-in: `print()` for output
-
 ## Installation
 
 ```bash

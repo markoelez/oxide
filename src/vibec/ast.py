@@ -34,8 +34,16 @@ class TupleType:
   element_types: tuple["TypeAnnotation", ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RefType:
+  """Reference type: &T or &mut T."""
+
+  inner: "TypeAnnotation"
+  mutable: bool
+
+
 # Type annotation union
-TypeAnnotation = SimpleType | ArrayType | VecType | TupleType
+TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType
 
 
 # === Expressions ===
@@ -176,6 +184,21 @@ class MatchExpr:
   arms: tuple[MatchArm, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RefExpr:
+  """Create reference: &x or &mut x."""
+
+  target: "Expr"
+  mutable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DerefExpr:
+  """Dereference: *ptr."""
+
+  target: "Expr"
+
+
 # Expression union type
 Expr = (
   IntLiteral
@@ -194,6 +217,8 @@ Expr = (
   | TupleIndexExpr
   | EnumLiteral
   | MatchExpr
+  | RefExpr
+  | DerefExpr
 )
 
 
@@ -276,8 +301,16 @@ class FieldAssignStmt:
   value: Expr
 
 
+@dataclass(frozen=True, slots=True)
+class DerefAssignStmt:
+  """Assignment through dereference: *ptr = value"""
+
+  target: Expr
+  value: Expr
+
+
 # Statement union type
-Stmt = LetStmt | AssignStmt | IndexAssignStmt | FieldAssignStmt | ReturnStmt | ExprStmt | IfStmt | WhileStmt | ForStmt
+Stmt = LetStmt | AssignStmt | IndexAssignStmt | FieldAssignStmt | DerefAssignStmt | ReturnStmt | ExprStmt | IfStmt | WhileStmt | ForStmt
 
 
 # === Top-level Definitions ===

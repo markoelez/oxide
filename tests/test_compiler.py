@@ -97,6 +97,13 @@ class TestLexer:
     assert TokenType.LBRACE in types
     assert TokenType.RBRACE in types
 
+  def test_ampersand(self):
+    source = "& &mut"
+    tokens = tokenize(source)
+    types = [t.type for t in tokens]
+    assert TokenType.AMP in types
+    assert TokenType.MUT in types
+
   def test_string_literal(self):
     source = '"hello world"'
     tokens = tokenize(source)
@@ -514,6 +521,70 @@ fn main() -> i64:
     assert isinstance(method.params[0].type_ann, SimpleType)
     assert method.params[0].type_ann.name == "Self"
 
+  def test_ref_type(self):
+    source = """fn read(x: &i64) -> i64:
+    return *x
+
+fn main() -> i64:
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import RefType, SimpleType
+
+    param = ast.functions[0].params[0]
+    assert isinstance(param.type_ann, RefType)
+    assert param.type_ann.mutable is False
+    assert isinstance(param.type_ann.inner, SimpleType)
+    assert param.type_ann.inner.name == "i64"
+
+  def test_mut_ref_type(self):
+    source = """fn modify(x: &mut i64) -> i64:
+    *x = 42
+    return *x
+
+fn main() -> i64:
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import RefType, SimpleType
+
+    param = ast.functions[0].params[0]
+    assert isinstance(param.type_ann, RefType)
+    assert param.type_ann.mutable is True
+    assert isinstance(param.type_ann.inner, SimpleType)
+
+  def test_ref_expr(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r: &i64 = &x
+    return *r
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import LetStmt, RefExpr, VarExpr
+
+    stmt = ast.functions[0].body[1]
+    assert isinstance(stmt, LetStmt)
+    assert isinstance(stmt.value, RefExpr)
+    assert stmt.value.mutable is False
+    assert isinstance(stmt.value.target, VarExpr)
+
+  def test_deref_assign(self):
+    source = """fn main() -> i64:
+    let x: i64 = 10
+    let r: &mut i64 = &mut x
+    *r = 42
+    return x
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import DerefAssignStmt
+
+    stmt = ast.functions[0].body[2]
+    assert isinstance(stmt, DerefAssignStmt)
+
 
 class TestChecker:
   def test_type_mismatch(self):
@@ -927,6 +998,257 @@ fn main() -> i64:
     with pytest.raises(TypeError):
       check(ast)
 
+  def test_ref_type_valid(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r: &i64 = &x
+    return *r
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_mut_ref_type_valid(self):
+    source = """fn main() -> i64:
+    let x: i64 = 10
+    let r: &mut i64 = &mut x
+    *r = 42
+    return *r
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_deref_non_ref_error(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    return *x
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot dereference non-reference"):
+      check(ast)
+
+  def test_deref_assign_non_mut_ref_error(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r: &i64 = &x
+    *r = 10
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot assign through non-mutable reference"):
+      check(ast)
+
+  def test_ref_type_mismatch(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r: &bool = &x
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
+
+  def test_use_after_move(self):
+    source = """struct Point:
+    x: i64
+
+fn consume(p: Point) -> i64:
+    return p.x
+
+fn main() -> i64:
+    let p: Point = Point { x: 42 }
+    let a: i64 = consume(p)
+    let b: i64 = p.x
+    return a + b
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Use of moved variable"):
+      check(ast)
+
+  def test_copy_type_no_move(self):
+    source = """fn takes_int(x: i64) -> i64:
+    return x
+
+fn main() -> i64:
+    let x: i64 = 42
+    let a: i64 = takes_int(x)
+    let b: i64 = x
+    return a + b
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise - i64 is Copy
+
+  def test_ref_param_no_move(self):
+    source = """struct Point:
+    x: i64
+
+fn read_point(p: &Point) -> i64:
+    return 0
+
+fn main() -> i64:
+    let p: Point = Point { x: 42 }
+    let a: i64 = read_point(&p)
+    return p.x
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise - passed by reference
+
+  def test_move_on_assignment(self):
+    source = """struct Point:
+    x: i64
+
+fn main() -> i64:
+    let p1: Point = Point { x: 42 }
+    let p2: Point = p1
+    return p1.x
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Use of moved variable"):
+      check(ast)
+
+  def test_double_mut_borrow_error(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r1: &mut i64 = &mut x
+    let r2: &mut i64 = &mut x
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="already borrowed as mutable"):
+      check(ast)
+
+  def test_mut_and_shared_borrow_error(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r1: &i64 = &x
+    let r2: &mut i64 = &mut x
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="already borrowed as immutable"):
+      check(ast)
+
+  def test_shared_after_mut_borrow_error(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r1: &mut i64 = &mut x
+    let r2: &i64 = &x
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="already borrowed as mutable"):
+      check(ast)
+
+  def test_multiple_shared_borrows_ok(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r1: &i64 = &x
+    let r2: &i64 = &x
+    let r3: &i64 = &x
+    return *r1 + *r2 + *r3
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise - multiple shared borrows are OK
+
+  def test_mutate_while_borrowed_error(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r: &i64 = &x
+    x = 100
+    return *r
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="currently borrowed"):
+      check(ast)
+
+  def test_move_in_while_loop_error(self):
+    source = """struct Point:
+    x: i64
+
+fn consume(p: Point) -> i64:
+    return p.x
+
+fn main() -> i64:
+    let p: Point = Point { x: 42 }
+    let i: i64 = 0
+    while i < 3:
+        let x: i64 = consume(p)
+        i = i + 1
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot move .* inside a loop"):
+      check(ast)
+
+  def test_move_in_for_loop_error(self):
+    source = """struct Point:
+    x: i64
+
+fn consume(p: Point) -> i64:
+    return p.x
+
+fn main() -> i64:
+    let p: Point = Point { x: 42 }
+    for i in range(0, 3):
+        let x: i64 = consume(p)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot move .* inside a loop"):
+      check(ast)
+
+  def test_copy_in_loop_ok(self):
+    source = """fn takes_int(x: i64) -> i64:
+    return x
+
+fn main() -> i64:
+    let x: i64 = 42
+    let sum: i64 = 0
+    for i in range(0, 3):
+        sum = sum + takes_int(x)
+    return sum
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise - i64 is Copy
+
 
 class TestCodegen:
   def test_generates_assembly(self):
@@ -1284,6 +1606,49 @@ fn main() -> i64:
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 40
 
+  def test_struct_assignment(self):
+    """Test struct-to-struct assignment copies all fields."""
+    source = """struct Point:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    let p1: Point = Point { x: 3, y: 4 }
+    let p2: Point = p1
+    return p2.x + p2.y
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 7
+
+  def test_struct_assignment_multiple_fields(self):
+    """Test struct assignment with many fields."""
+    source = """struct Rectangle:
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+
+fn main() -> i64:
+    let r1: Rectangle = Rectangle { x: 10, y: 20, width: 30, height: 40 }
+    let r2: Rectangle = r1
+    return r2.x + r2.y + r2.width + r2.height
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100
+
+  def test_struct_assignment_preserves_original(self):
+    """Test that struct assignment is a copy (before move semantics apply)."""
+    source = """struct Value:
+    n: i64
+
+fn main() -> i64:
+    let v1: Value = Value { n: 42 }
+    let v2: Value = v1
+    return v2.n
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
   def test_comments(self):
     source = """# This is a comment at the top
 fn main() -> i64:
@@ -1474,3 +1839,46 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 30
+
+  def test_ref_basic(self):
+    source = """fn main() -> i64:
+    let x: i64 = 42
+    let r: &i64 = &x
+    return *r
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_mut_ref_modify(self):
+    source = """fn main() -> i64:
+    let x: i64 = 10
+    let r: &mut i64 = &mut x
+    *r = 42
+    return x
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_ref_pass_to_function(self):
+    source = """fn read_ref(r: &i64) -> i64:
+    return *r
+
+fn main() -> i64:
+    let x: i64 = 100
+    return read_ref(&x)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100
+
+  def test_mut_ref_pass_to_function(self):
+    source = """fn modify_ref(r: &mut i64) -> i64:
+    *r = 50
+    return *r
+
+fn main() -> i64:
+    let x: i64 = 10
+    let result: i64 = modify_ref(&mut x)
+    return x + result
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100  # 50 + 50

@@ -9,12 +9,15 @@ from .ast import (
   ForStmt,
   LetStmt,
   Program,
+  RefExpr,
+  RefType,
   VarExpr,
   VecType,
   CallExpr,
   ExprStmt,
   Function,
   ArrayType,
+  DerefExpr,
   IndexExpr,
   MatchExpr,
   TupleType,
@@ -34,6 +37,7 @@ from .ast import (
   MethodCallExpr,
   TupleIndexExpr,
   TypeAnnotation,
+  DerefAssignStmt,
   FieldAccessExpr,
   FieldAssignStmt,
   IndexAssignStmt,
@@ -65,6 +69,9 @@ def type_to_str(t: TypeAnnotation) -> str:
       return f"vec[{type_to_str(elem)}]"
     case TupleType(elems):
       return f"({','.join(type_to_str(e) for e in elems)})"
+    case RefType(inner, mutable):
+      prefix = "&mut " if mutable else "&"
+      return f"{prefix}{type_to_str(inner)}"
   raise TypeError(f"Unknown type annotation: {t}")
 
 
@@ -105,6 +112,40 @@ def get_tuple_element_types(type_str: str) -> list[str]:
   return [t.strip() for t in inner.split(",")]
 
 
+def is_ref_type(type_str: str) -> bool:
+  """Check if type string represents a reference."""
+  return type_str.startswith("&")
+
+
+def is_copy_type(type_str: str) -> bool:
+  """Check if a type is Copy (implicitly cloned on use).
+
+  Copy types:
+  - Primitives: i64, bool
+  - References: &T, &mut T (copying the pointer)
+  - str (string literals are immutable)
+  """
+  if type_str in ("i64", "bool", "str"):
+    return True
+  if is_ref_type(type_str):
+    return True
+  return False
+
+
+def is_mut_ref_type(type_str: str) -> bool:
+  """Check if type string represents a mutable reference."""
+  return type_str.startswith("&mut ")
+
+
+def get_ref_inner_type(type_str: str) -> str | None:
+  """Extract inner type from reference type string."""
+  if type_str.startswith("&mut "):
+    return type_str[5:]
+  elif type_str.startswith("&"):
+    return type_str[1:]
+  return None
+
+
 @dataclass
 class StructInfo:
   """Stores a struct's field information."""
@@ -117,6 +158,24 @@ class EnumInfo:
   """Stores an enum's variant information."""
 
   variants: dict[str, str | None]  # variant_name -> payload_type (None for unit variants)
+
+
+@dataclass
+class VarState:
+  """Tracks the ownership state of a variable."""
+
+  type_str: str
+  ownership: str  # "owned", "moved", "borrowed", "mut_borrowed"
+  scope_depth: int  # Scope level where variable was defined
+
+
+@dataclass
+class Borrow:
+  """Tracks an active borrow of a variable."""
+
+  var_name: str  # The variable being borrowed
+  mutable: bool  # Is this a mutable borrow?
+  scope_depth: int  # Scope level where borrow was created
 
 
 class TypeChecker:
@@ -136,29 +195,121 @@ class TypeChecker:
     self.struct_methods: dict[str, dict[str, FunctionSignature]] = {}
     # Function signatures: name -> signature
     self.functions: dict[str, FunctionSignature] = dict(self.BUILTINS)
-    # Variable scopes: list of (name -> type) dicts
-    self.scopes: list[dict[str, str]] = []
+    # Variable scopes: list of (name -> VarState) dicts
+    self.scopes: list[dict[str, VarState]] = []
     # Current function's return type (for checking return statements)
     self.current_return_type: str | None = None
     # Current struct type when checking impl methods (for resolving 'Self')
     self.current_impl_type: str | None = None
+    # Current scope depth (for tracking borrow lifetimes)
+    self.scope_depth: int = 0
+    # Active borrows: list of Borrow tracking current borrows
+    self.active_borrows: list[Borrow] = []
+    # Loop depth (for detecting moves inside loops)
+    self.loop_depth: int = 0
 
   def _enter_scope(self) -> None:
     self.scopes.append({})
+    self.scope_depth += 1
 
   def _exit_scope(self) -> None:
+    # End all borrows that were created in this scope
+    self.active_borrows = [b for b in self.active_borrows if b.scope_depth < self.scope_depth]
+    # Restore ownership for variables that were borrowed in this scope
+    for borrow in list(self.active_borrows):
+      if borrow.scope_depth == self.scope_depth:
+        self._set_var_ownership(borrow.var_name, "owned")
     self.scopes.pop()
+    self.scope_depth -= 1
 
   def _define_var(self, name: str, type_name: str) -> None:
     if name in self.scopes[-1]:
       raise TypeError(f"Variable '{name}' already defined in this scope")
-    self.scopes[-1][name] = type_name
+    self.scopes[-1][name] = VarState(type_name, "owned", self.scope_depth)
 
   def _lookup_var(self, name: str) -> str:
+    """Look up variable and return its type string."""
+    for scope in reversed(self.scopes):
+      if name in scope:
+        return scope[name].type_str
+    raise TypeError(f"Undefined variable '{name}'")
+
+  def _lookup_var_state(self, name: str) -> VarState | None:
+    """Look up variable and return its full state."""
     for scope in reversed(self.scopes):
       if name in scope:
         return scope[name]
-    raise TypeError(f"Undefined variable '{name}'")
+    return None
+
+  def _set_var_ownership(self, name: str, ownership: str) -> None:
+    """Update the ownership state of a variable."""
+    for scope in reversed(self.scopes):
+      if name in scope:
+        scope[name] = VarState(scope[name].type_str, ownership, scope[name].scope_depth)
+        return
+
+  def _check_not_moved(self, name: str) -> None:
+    """Check that a variable hasn't been moved."""
+    state = self._lookup_var_state(name)
+    if state is not None and state.ownership == "moved":
+      raise TypeError(f"Use of moved variable '{name}'")
+
+  def _maybe_move_var(self, name: str) -> None:
+    """Mark a variable as moved if its type is not Copy."""
+    state = self._lookup_var_state(name)
+    if state is not None and not is_copy_type(state.type_str):
+      # Check for move inside loop
+      if self.loop_depth > 0:
+        raise TypeError(f"Cannot move '{name}' inside a loop")
+      self._set_var_ownership(name, "moved")
+
+  def _has_active_borrow(self, name: str) -> bool:
+    """Check if variable has any active borrow."""
+    return any(b.var_name == name for b in self.active_borrows)
+
+  def _has_mut_borrow(self, name: str) -> bool:
+    """Check if variable has an active mutable borrow."""
+    return any(b.var_name == name and b.mutable for b in self.active_borrows)
+
+  def _has_shared_borrow(self, name: str) -> bool:
+    """Check if variable has an active shared (immutable) borrow."""
+    return any(b.var_name == name and not b.mutable for b in self.active_borrows)
+
+  def _create_borrow(self, name: str, mutable: bool) -> None:
+    """Create a borrow of a variable, checking for conflicts."""
+    state = self._lookup_var_state(name)
+    if state is None:
+      return  # Variable not found, let _lookup_var handle the error
+
+    # Check for use-after-move
+    if state.ownership == "moved":
+      raise TypeError(f"Cannot borrow moved variable '{name}'")
+
+    # Check for borrow conflicts
+    if mutable:
+      # Mutable borrow requires no existing borrows
+      if self._has_active_borrow(name):
+        if self._has_mut_borrow(name):
+          raise TypeError(f"Cannot borrow '{name}' as mutable: already borrowed as mutable")
+        else:
+          raise TypeError(f"Cannot borrow '{name}' as mutable: already borrowed as immutable")
+      self._set_var_ownership(name, "mut_borrowed")
+    else:
+      # Shared borrow requires no mutable borrows
+      if self._has_mut_borrow(name):
+        raise TypeError(f"Cannot borrow '{name}' as immutable: already borrowed as mutable")
+      self._set_var_ownership(name, "borrowed")
+
+    # Record the borrow
+    self.active_borrows.append(Borrow(name, mutable, self.scope_depth))
+
+  def _check_not_borrowed(self, name: str) -> None:
+    """Check that a variable is not currently borrowed (for mutation/move)."""
+    if self._has_active_borrow(name):
+      if self._has_mut_borrow(name):
+        raise TypeError(f"Cannot use '{name}': it is currently mutably borrowed")
+      else:
+        raise TypeError(f"Cannot mutate '{name}': it is currently borrowed")
 
   def _check_type_ann(self, t: TypeAnnotation) -> str:
     """Verify type annotation is valid and return canonical string."""
@@ -185,6 +336,10 @@ class TypeChecker:
       case TupleType(elems):
         elem_strs = [self._check_type_ann(e) for e in elems]
         return f"({','.join(elem_strs)})"
+      case RefType(inner, mutable):
+        inner_str = self._check_type_ann(inner)
+        prefix = "&mut " if mutable else "&"
+        return f"{prefix}{inner_str}"
     raise TypeError(f"Unknown type annotation: {t}")
 
   def check(self, program: Program) -> None:
@@ -301,9 +456,17 @@ class TypeChecker:
           pass  # OK: empty array assigned to vec type
         elif value_type != declared_type:
           raise TypeError(f"Cannot assign {value_type} to variable of type {declared_type}")
+        # Mark source variable as moved if applicable
+        match value:
+          case VarExpr(src_name):
+            self._maybe_move_var(src_name)
+          case _:
+            pass
         self._define_var(name, declared_type)
 
       case AssignStmt(name, value):
+        # Check variable isn't borrowed before mutation
+        self._check_not_borrowed(name)
         var_type = self._lookup_var(name)
         value_type = self._check_expr(value)
         if value_type != var_type:
@@ -352,10 +515,12 @@ class TypeChecker:
         if cond_type != "bool":
           raise TypeError(f"While condition must be bool, got {cond_type}")
 
+        self.loop_depth += 1
         self._enter_scope()
         for s in body:
           self._check_stmt(s)
         self._exit_scope()
+        self.loop_depth -= 1
 
       case ForStmt(var, start, end, body):
         start_type = self._check_expr(start)
@@ -366,11 +531,13 @@ class TypeChecker:
         if end_type != "i64":
           raise TypeError(f"For loop end must be i64, got {end_type}")
 
+        self.loop_depth += 1
         self._enter_scope()
         self._define_var(var, "i64")
         for s in body:
           self._check_stmt(s)
         self._exit_scope()
+        self.loop_depth -= 1
 
       case FieldAssignStmt(target, field, value):
         target_type = self._check_expr(target)
@@ -383,6 +550,18 @@ class TypeChecker:
         value_type = self._check_expr(value)
         if value_type != field_type:
           raise TypeError(f"Cannot assign {value_type} to field of type {field_type}")
+
+      case DerefAssignStmt(target, value):
+        # *ptr = value - assign through a mutable reference
+        target_type = self._check_expr(target)
+        if not is_mut_ref_type(target_type):
+          raise TypeError(f"Cannot assign through non-mutable reference '{target_type}'")
+        inner_type = get_ref_inner_type(target_type)
+        if inner_type is None:
+          raise TypeError(f"Invalid reference type '{target_type}'")
+        value_type = self._check_expr(value)
+        if value_type != inner_type:
+          raise TypeError(f"Cannot assign {value_type} to dereferenced {target_type}")
 
   def _check_expr(self, expr: Expr) -> str:
     """Type check an expression and return its type."""
@@ -397,6 +576,7 @@ class TypeChecker:
         return "str"
 
       case VarExpr(name):
+        self._check_not_moved(name)
         return self._lookup_var(name)
 
       case ArrayLiteral(elements):
@@ -591,8 +771,37 @@ class TypeChecker:
           arg_type = self._check_expr(arg)
           if arg_type != expected_type:
             raise TypeError(f"Argument {i + 1} of '{name}' expects {expected_type}, got {arg_type}")
+          # Mark variable as moved if passed by value (not a reference type param)
+          if not is_ref_type(expected_type):
+            match arg:
+              case VarExpr(var_name):
+                self._maybe_move_var(var_name)
+              case _:
+                pass
 
         return sig.return_type
+
+      case RefExpr(target, mutable):
+        # &x or &mut x - create a reference to the target
+        target_type = self._check_expr(target)
+        # Create the borrow (checks for conflicts)
+        match target:
+          case VarExpr(name):
+            self._create_borrow(name, mutable)
+          case _:
+            pass  # Complex expressions - limited borrow tracking
+        prefix = "&mut " if mutable else "&"
+        return f"{prefix}{target_type}"
+
+      case DerefExpr(target):
+        # *ptr - dereference a pointer
+        target_type = self._check_expr(target)
+        if not is_ref_type(target_type):
+          raise TypeError(f"Cannot dereference non-reference type '{target_type}'")
+        inner_type = get_ref_inner_type(target_type)
+        if inner_type is None:
+          raise TypeError(f"Invalid reference type '{target_type}'")
+        return inner_type
 
     raise TypeError(f"Unknown expression type: {type(expr)}")
 

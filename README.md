@@ -9,12 +9,7 @@ A toy compiled programming language with Python/Rust hybrid syntax, targeting AR
 Vibec combines Python's indentation-based blocks with Rust's explicit type annotations:
 
 ```
-# Enums with pattern matching
-enum Option:
-    Some(i64)
-    None
-
-# Structs with impl blocks
+# Ownership and borrowing (like Rust)
 struct Point:
     x: i64
     y: i64
@@ -23,41 +18,38 @@ impl Point:
     fn sum(self) -> i64:
         return self.x + self.y
 
-fn unwrap_or(opt: Option, default: i64) -> i64:
-    match opt:
-        Option::Some(val):
-            return val
-        Option::None:
-            return default
+fn read_point(p: &Point) -> i64:    # Borrow immutably
+    return p.x + p.y
+
+fn modify_point(p: &mut Point) -> i64:  # Borrow mutably
+    p.x = p.x + 10
+    return p.x
 
 fn main() -> i64:
-    # Enums and pattern matching
-    let x: Option = Option::Some(42)
-    let result: i64 = unwrap_or(x, 0)
-
-    # Structs and methods
     let p: Point = Point { x: 10, y: 20 }
-    print(p.sum())  # Method call
-
-    # Arrays, vectors, tuples
-    let arr: [i64; 3] = [1, 2, 3]
-    let nums: vec[i64] = []
-    nums.push(42)
-    let t: (i64, bool) = (100, true)
-
-    # Control flow
-    for i in range(5):
-        print(i)
-
-    return factorial(5)
-
-fn factorial(n: i64) -> i64:
-    if n <= 1:
-        return 1
-    return n * factorial(n - 1)
+    
+    # Multiple shared borrows are OK
+    let sum1: i64 = read_point(&p)
+    let sum2: i64 = read_point(&p)
+    
+    # Mutable borrow is exclusive
+    let result: i64 = modify_point(&mut p)
+    
+    # Can still use after borrow ends
+    print(p.sum())
+    
+    return 0
 ```
 
-**Supported:** enums with `match`, functions, structs with `impl` methods, tuples `(T1, T2)`, arrays `[T; N]`, vectors `vec[T]`, `if`/`else`, `while`, `for i in range()`, arithmetic, comparisons, logical ops, `print()`
+**Ownership System:**
+- Values have a single owner; ownership transfers on assignment/function calls
+- Primitives (`i64`, `bool`) are `Copy` - they clone instead of move
+- `&T` - shared/immutable borrow (multiple allowed)
+- `&mut T` - exclusive/mutable borrow (only one at a time)
+- Cannot use values after they've been moved
+- Cannot move values inside loops
+
+**Supported:** ownership & borrowing, enums with `match`, functions, structs with `impl` methods, tuples, arrays, vectors, `if`/`else`, `while`, `for i in range()`, references `&T`/`&mut T`
 
 ## Architecture
 

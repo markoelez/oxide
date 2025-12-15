@@ -23,6 +23,7 @@ examples/structs
 examples/tuples
 examples/enums
 examples/impl
+examples/references
 
 # uv lock file
 uv.lock

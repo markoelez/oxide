@@ -7,6 +7,8 @@ from .ast import (
   ForStmt,
   LetStmt,
   Program,
+  RefExpr,
+  RefType,
   VarExpr,
   VecType,
   CallExpr,
@@ -14,6 +16,7 @@ from .ast import (
   Function,
   MatchArm,
   ArrayType,
+  DerefExpr,
   IndexExpr,
   MatchExpr,
   TupleType,
@@ -33,6 +36,7 @@ from .ast import (
   MethodCallExpr,
   TupleIndexExpr,
   TypeAnnotation,
+  DerefAssignStmt,
   FieldAccessExpr,
   FieldAssignStmt,
   IndexAssignStmt,
@@ -50,7 +54,15 @@ def type_to_str(t: TypeAnnotation) -> str:
       return f"vec[{type_to_str(elem)}]"
     case TupleType(elems):
       return f"({','.join(type_to_str(e) for e in elems)})"
+    case RefType(inner, mutable):
+      prefix = "&mut " if mutable else "&"
+      return f"{prefix}{type_to_str(inner)}"
   return "unknown"
+
+
+def is_ref_type(type_str: str) -> bool:
+  """Check if type string represents a reference."""
+  return type_str.startswith("&")
 
 
 def get_array_size(type_str: str) -> int | None:
@@ -187,6 +199,9 @@ class CodeGenerator:
         case FieldAssignStmt(target, _, value):
           self._collect_strings_from_expr(target)
           self._collect_strings_from_expr(value)
+        case DerefAssignStmt(target, value):
+          self._collect_strings_from_expr(target)
+          self._collect_strings_from_expr(value)
 
   def _collect_strings_from_expr(self, expr: Expr) -> None:
     """Collect strings from an expression."""
@@ -228,6 +243,10 @@ class CodeGenerator:
         self._collect_strings_from_expr(target)
         for arm in arms:
           self._collect_strings_from_stmts(arm.body)
+      case RefExpr(target, _):
+        self._collect_strings_from_expr(target)
+      case DerefExpr(target):
+        self._collect_strings_from_expr(target)
       case _:
         pass
 
@@ -467,6 +486,12 @@ class CodeGenerator:
                     self._emit(f"    str x0, [x29, #{offset - i * 8}]")
                   else:
                     self._emit(f"    str xzr, [x29, #{offset - i * 8}]")
+              case VarExpr(src_name):
+                # Copy struct from another variable
+                src_offset, _ = self.locals[src_name]
+                for i in range(len(fields)):
+                  self._emit(f"    ldr x0, [x29, #{src_offset - i * 8}]")
+                  self._emit(f"    str x0, [x29, #{offset - i * 8}]")
               case _:
                 # Initialize all to zero
                 for i in range(len(fields)):
@@ -642,6 +667,18 @@ class CodeGenerator:
               self._emit(f"    str x0, [x29, #{var_offset - field_idx * 8}]")
           case _:
             pass  # Nested field access would need more work
+
+      case DerefAssignStmt(target, value):
+        # *ptr = value - store through pointer
+        # First evaluate the value and save it
+        self._gen_expr(value)
+        self._emit("    str x0, [sp, #-16]!")  # Push value
+        # Then evaluate the pointer
+        self._gen_expr(target)
+        self._emit("    mov x1, x0")  # Address in x1
+        # Pop value and store through pointer
+        self._emit("    ldr x0, [sp], #16")
+        self._emit("    str x0, [x1]")
 
   def _gen_expr(self, expr: Expr) -> None:
     """Generate assembly for an expression, result in x0."""
@@ -851,6 +888,23 @@ class CodeGenerator:
 
       case MatchExpr(target, arms):
         self._gen_match(target, arms)
+
+      case RefExpr(target, _mutable):
+        # &x or &mut x - compute address of target
+        match target:
+          case VarExpr(name):
+            offset, _ = self.locals[name]
+            # Load address of variable into x0
+            self._emit(f"    add x0, x29, #{offset}")
+          case _:
+            # For complex expressions, evaluate and the result IS the address
+            # This handles things like &arr[i] etc.
+            self._gen_expr(target)
+
+      case DerefExpr(target):
+        # *ptr - load value from address
+        self._gen_expr(target)  # Get address into x0
+        self._emit("    ldr x0, [x0]")  # Load value at that address
 
   def _gen_print(self, args: tuple[Expr, ...]) -> None:
     """Generate code for print() builtin.

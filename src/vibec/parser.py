@@ -8,6 +8,8 @@ from .ast import (
   ForStmt,
   LetStmt,
   Program,
+  RefExpr,
+  RefType,
   VarExpr,
   VecType,
   CallExpr,
@@ -15,6 +17,7 @@ from .ast import (
   Function,
   MatchArm,
   ArrayType,
+  DerefExpr,
   ImplBlock,
   IndexExpr,
   MatchExpr,
@@ -39,6 +42,7 @@ from .ast import (
   MethodCallExpr,
   TupleIndexExpr,
   TypeAnnotation,
+  DerefAssignStmt,
   FieldAccessExpr,
   FieldAssignStmt,
   IndexAssignStmt,
@@ -265,7 +269,17 @@ class Parser:
     return Parameter(name_token.value, type_ann)
 
   def _parse_type(self) -> TypeAnnotation:
-    """Parse a type annotation: simple, [T; N], vec[T], or (T1, T2, ...)."""
+    """Parse a type annotation: simple, [T; N], vec[T], (T1, T2, ...), &T, or &mut T."""
+    # Reference type: &T or &mut T
+    if self._check(TokenType.AMP):
+      self._advance()
+      mutable = False
+      if self._check(TokenType.MUT):
+        self._advance()
+        mutable = True
+      inner_type = self._parse_type()
+      return RefType(inner_type, mutable)
+
     # Array type: [T; N]
     if self._check(TokenType.LBRACKET):
       self._advance()
@@ -327,6 +341,9 @@ class Parser:
       return self._parse_while()
     elif self._check(TokenType.FOR):
       return self._parse_for()
+    elif self._check(TokenType.STAR):
+      # Could be: dereference assignment (*ptr = value) or expression statement
+      return self._parse_deref_assign_or_expr()
     elif self._check(TokenType.IDENT):
       # Could be: assignment, index/field assignment, or expression statement
       if self._peek().type == TokenType.ASSIGN:
@@ -351,6 +368,20 @@ class Parser:
         return FieldAssignStmt(expr.target, expr.field, value)
       else:
         raise ParseError("Invalid assignment target", self._current())
+    self._expect(TokenType.NEWLINE, "Expected newline after expression")
+    return ExprStmt(expr)
+
+  def _parse_deref_assign_or_expr(self) -> Stmt:
+    """Parse dereference assignment (*ptr = value) or expression statement."""
+    expr = self._parse_expression()
+    if self._check(TokenType.ASSIGN):
+      self._advance()  # consume '='
+      value = self._parse_expression()
+      self._expect(TokenType.NEWLINE, "Expected newline after assignment")
+      if isinstance(expr, DerefExpr):
+        return DerefAssignStmt(expr.target, value)
+      else:
+        raise ParseError("Invalid dereference assignment target", self._current())
     self._expect(TokenType.NEWLINE, "Expected newline after expression")
     return ExprStmt(expr)
 
@@ -474,6 +505,22 @@ class Parser:
       self._advance()
       operand = self._parse_unary()
       return UnaryExpr("not", operand)
+
+    # Reference creation: &expr or &mut expr
+    elif self._check(TokenType.AMP):
+      self._advance()
+      mutable = False
+      if self._check(TokenType.MUT):
+        self._advance()
+        mutable = True
+      operand = self._parse_unary()
+      return RefExpr(operand, mutable)
+
+    # Dereference: *expr
+    elif self._check(TokenType.STAR):
+      self._advance()
+      operand = self._parse_unary()
+      return DerefExpr(operand)
 
     return self._parse_primary()
 

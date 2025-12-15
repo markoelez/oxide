@@ -13,6 +13,7 @@ class TokenType(Enum):
   ENUM = auto()
   MATCH = auto()
   SELF = auto()
+  MUT = auto()
   IF = auto()
   ELSE = auto()
   WHILE = auto()
@@ -51,6 +52,7 @@ class TokenType(Enum):
   STAR = auto()
   SLASH = auto()
   PERCENT = auto()
+  AMP = auto()  # & for references
 
   # Comparison
   EQ = auto()
@@ -80,6 +82,7 @@ KEYWORDS: dict[str, TokenType] = {
   "enum": TokenType.ENUM,
   "match": TokenType.MATCH,
   "self": TokenType.SELF,
+  "mut": TokenType.MUT,
   "if": TokenType.IF,
   "else": TokenType.ELSE,
   "while": TokenType.WHILE,

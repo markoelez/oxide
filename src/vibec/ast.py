@@ -30,6 +30,13 @@ class BoolLiteral:
 
 
 @dataclass(frozen=True, slots=True)
+class StringLiteral:
+  """String literal like "hello"."""
+
+  value: str
+
+
+@dataclass(frozen=True, slots=True)
 class VarExpr:
   """Variable reference."""
 
@@ -62,7 +69,7 @@ class CallExpr:
 
 
 # Expression union type
-Expr = IntLiteral | BoolLiteral | VarExpr | BinaryExpr | UnaryExpr | CallExpr
+Expr = IntLiteral | BoolLiteral | StringLiteral | VarExpr | BinaryExpr | UnaryExpr | CallExpr
 
 
 # === Statements ===

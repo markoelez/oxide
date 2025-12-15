@@ -75,6 +75,18 @@ class TestLexer:
     assert TokenType.TRUE in types
     assert TokenType.FALSE in types
 
+  def test_string_literal(self):
+    source = '"hello world"'
+    tokens = tokenize(source)
+    assert tokens[0].type == TokenType.STRING
+    assert tokens[0].value == "hello world"
+
+  def test_string_escape_sequences(self):
+    source = r'"line1\nline2\ttab\\"'
+    tokens = tokenize(source)
+    assert tokens[0].type == TokenType.STRING
+    assert tokens[0].value == "line1\nline2\ttab\\"
+
 
 class TestParser:
   def test_simple_function(self):
@@ -134,6 +146,21 @@ class TestParser:
 
     assert isinstance(ast.functions[0].body[0], WhileStmt)
 
+  def test_string_literal(self):
+    source = """fn main() -> i64:
+    print("hello")
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import CallExpr, ExprStmt, StringLiteral
+
+    stmt = ast.functions[0].body[0]
+    assert isinstance(stmt, ExprStmt)
+    assert isinstance(stmt.expr, CallExpr)
+    assert isinstance(stmt.expr.args[0], StringLiteral)
+    assert stmt.expr.args[0].value == "hello"
+
 
 class TestChecker:
   def test_type_mismatch(self):
@@ -189,6 +216,28 @@ class TestChecker:
     tokens = tokenize(source)
     ast = parse(tokens)
     check(ast)  # Should not raise
+
+  def test_string_type(self):
+    source = """fn main() -> i64:
+    let s: str = "hello"
+    print(s)
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_string_type_mismatch(self):
+    source = """fn main() -> i64:
+    let s: str = 42
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
+      check(ast)
 
 
 class TestCodegen:
@@ -275,3 +324,31 @@ fn main() -> i64:
     exit_code, stdout = self._compile_and_run(source)
     assert exit_code == 0
     assert stdout.strip() == "55"
+
+  def test_print_string(self):
+    source = """fn main() -> i64:
+    print("Hello, World!")
+    return 0
+"""
+    exit_code, stdout = self._compile_and_run(source)
+    assert exit_code == 0
+    assert stdout.strip() == "Hello, World!"
+
+  def test_string_variable(self):
+    source = """fn main() -> i64:
+    let msg: str = "Vibec"
+    print(msg)
+    return 0
+"""
+    exit_code, stdout = self._compile_and_run(source)
+    assert exit_code == 0
+    assert stdout.strip() == "Vibec"
+
+  def test_string_escape_sequences(self):
+    source = r"""fn main() -> i64:
+    print("line1\nline2")
+    return 0
+"""
+    exit_code, stdout = self._compile_and_run(source)
+    assert exit_code == 0
+    assert stdout.strip() == "line1\nline2"

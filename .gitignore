@@ -15,6 +15,7 @@ wheels/
 examples/factorial
 examples/fibonacci
 examples/hello
+examples/strings
 
 # uv lock file
 uv.lock

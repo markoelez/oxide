@@ -16,6 +16,7 @@ from .ast import (
   IntLiteral,
   ReturnStmt,
   BoolLiteral,
+  StringLiteral,
 )
 
 
@@ -36,11 +37,14 @@ class CodeGenerator:
   def __init__(self) -> None:
     self.output: list[str] = []
     self.label_counter = 0
-    # Maps variable name -> offset from x29 (negative values)
-    self.locals: dict[str, int] = {}
+    # Maps variable name -> (offset from x29, type)
+    self.locals: dict[str, tuple[int, str]] = {}
     self.frame_size = 0
     self.current_func_name = ""
     self.next_slot = 0
+    # String literals: value -> label
+    self.strings: dict[str, str] = {}
+    self.string_counter = 0
 
   def _emit(self, line: str) -> None:
     self.output.append(line)
@@ -50,12 +54,88 @@ class CodeGenerator:
     self.label_counter += 1
     return label
 
+  def _get_string_label(self, value: str) -> str:
+    """Get or create a label for a string literal."""
+    if value not in self.strings:
+      label = f"_str{self.string_counter}"
+      self.strings[value] = label
+      self.string_counter += 1
+    return self.strings[value]
+
+  def _escape_string(self, s: str) -> str:
+    """Escape a string for assembly .asciz directive."""
+    result = []
+    for c in s:
+      if c == "\n":
+        result.append("\\n")
+      elif c == "\t":
+        result.append("\\t")
+      elif c == "\\":
+        result.append("\\\\")
+      elif c == '"':
+        result.append('\\"')
+      elif ord(c) < 32 or ord(c) > 126:
+        result.append(f"\\x{ord(c):02x}")
+      else:
+        result.append(c)
+    return "".join(result)
+
+  def _collect_strings(self, program: Program) -> None:
+    """Collect all string literals from the program."""
+    for func in program.functions:
+      self._collect_strings_from_stmts(func.body)
+
+  def _collect_strings_from_stmts(self, stmts: tuple[Stmt, ...]) -> None:
+    """Collect strings from a list of statements."""
+    for stmt in stmts:
+      match stmt:
+        case LetStmt(_, _, value):
+          self._collect_strings_from_expr(value)
+        case ReturnStmt(value):
+          self._collect_strings_from_expr(value)
+        case ExprStmt(expr):
+          self._collect_strings_from_expr(expr)
+        case IfStmt(condition, then_body, else_body):
+          self._collect_strings_from_expr(condition)
+          self._collect_strings_from_stmts(then_body)
+          if else_body:
+            self._collect_strings_from_stmts(else_body)
+        case WhileStmt(condition, body):
+          self._collect_strings_from_expr(condition)
+          self._collect_strings_from_stmts(body)
+
+  def _collect_strings_from_expr(self, expr: Expr) -> None:
+    """Collect strings from an expression."""
+    match expr:
+      case StringLiteral(value):
+        self._get_string_label(value)
+      case BinaryExpr(left, _, right):
+        self._collect_strings_from_expr(left)
+        self._collect_strings_from_expr(right)
+      case UnaryExpr(_, operand):
+        self._collect_strings_from_expr(operand)
+      case CallExpr(_, args):
+        for arg in args:
+          self._collect_strings_from_expr(arg)
+      case _:
+        pass
+
   def generate(self, program: Program) -> str:
     """Generate assembly for the entire program."""
-    # Data section for printf format string
+    # First pass: collect all string literals
+    self._collect_strings(program)
+
+    # Data section
     self._emit(".section __DATA,__data")
     self._emit("_fmt_int:")
     self._emit('    .asciz "%lld\\n"')
+    self._emit("_fmt_str:")
+    self._emit('    .asciz "%s\\n"')
+
+    # Emit all string literals
+    for value, label in self.strings.items():
+      self._emit(f"{label}:")
+      self._emit(f'    .asciz "{self._escape_string(value)}"')
     self._emit("")
 
     # Text section
@@ -102,7 +182,7 @@ class CodeGenerator:
       self.frame_size = 32  # Minimum for some temp storage
 
     # Function label (prefix with _ for macOS)
-    self._emit(f".align 4")
+    self._emit(".align 4")
     self._emit(f"_{func.name}:")
 
     # Prologue: allocate full frame and save fp/lr at top
@@ -114,7 +194,7 @@ class CodeGenerator:
     # Parameters go at [x29 - 16], [x29 - 24], etc.
     for i, param in enumerate(func.params):
       offset = -16 - (self.next_slot * 8)
-      self.locals[param.name] = offset
+      self.locals[param.name] = (offset, param.type_ann.name)
       if i < 8:
         self._emit(f"    str x{i}, [x29, #{offset}]")
       self.next_slot += 1
@@ -133,12 +213,12 @@ class CodeGenerator:
   def _gen_stmt(self, stmt: Stmt) -> None:
     """Generate assembly for a statement."""
     match stmt:
-      case LetStmt(name, _, value):
+      case LetStmt(name, type_ann, value):
         # Evaluate value to x0
         self._gen_expr(value)
         # Allocate slot
         offset = -16 - (self.next_slot * 8)
-        self.locals[name] = offset
+        self.locals[name] = (offset, type_ann.name)
         self.next_slot += 1
         # Store value
         self._emit(f"    str x0, [x29, #{offset}]")
@@ -211,8 +291,13 @@ class CodeGenerator:
       case BoolLiteral(value):
         self._emit(f"    mov x0, #{1 if value else 0}")
 
+      case StringLiteral(value):
+        label = self.strings[value]
+        self._emit(f"    adrp x0, {label}@PAGE")
+        self._emit(f"    add x0, x0, {label}@PAGEOFF")
+
       case VarExpr(name):
-        offset = self.locals[name]
+        offset, _ = self.locals[name]
         self._emit(f"    ldr x0, [x29, #{offset}]")
 
       case BinaryExpr(left, op, right):
@@ -276,7 +361,6 @@ class CodeGenerator:
 
       case CallExpr(name, args):
         if name == "print":
-          # Special handling for print
           self._gen_print(args)
         else:
           self._gen_call(name, args)
@@ -287,19 +371,37 @@ class CodeGenerator:
     On ARM64 macOS, variadic arguments (like printf's format args)
     are passed on the stack, not in registers.
     """
+    arg = args[0]
+    is_string = self._is_string_expr(arg)
+
     # Evaluate the argument
-    self._gen_expr(args[0])
+    self._gen_expr(arg)
     # Store the value on the stack for variadic argument
     self._emit("    str x0, [sp, #-16]!")
-    # Load format string address to x0
-    self._emit("    adrp x0, _fmt_int@PAGE")
-    self._emit("    add x0, x0, _fmt_int@PAGEOFF")
+    # Load appropriate format string
+    if is_string:
+      self._emit("    adrp x0, _fmt_str@PAGE")
+      self._emit("    add x0, x0, _fmt_str@PAGEOFF")
+    else:
+      self._emit("    adrp x0, _fmt_int@PAGE")
+      self._emit("    add x0, x0, _fmt_int@PAGEOFF")
     # Call printf (variadic arg is at [sp])
     self._emit("    bl _printf")
     # Clean up stack
     self._emit("    add sp, sp, #16")
     # Return 0 (print returns i64)
     self._emit("    mov x0, #0")
+
+  def _is_string_expr(self, expr: Expr) -> bool:
+    """Check if an expression evaluates to a string."""
+    match expr:
+      case StringLiteral(_):
+        return True
+      case VarExpr(name):
+        _, type_name = self.locals[name]
+        return type_name == "str"
+      case _:
+        return False
 
   def _gen_call(self, name: str, args: tuple[Expr, ...]) -> None:
     """Generate code for a function call."""

@@ -17,6 +17,7 @@ from .ast import (
   IntLiteral,
   ReturnStmt,
   BoolLiteral,
+  StringLiteral,
   TypeAnnotation,
 )
 from .tokens import Token, TokenType
@@ -293,6 +294,10 @@ class Parser:
     elif token.type == TokenType.FALSE:
       self._advance()
       return BoolLiteral(False)
+
+    elif token.type == TokenType.STRING:
+      self._advance()
+      return StringLiteral(token.value)
 
     elif token.type == TokenType.IDENT:
       name = token.value

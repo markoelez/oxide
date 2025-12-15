@@ -21,6 +21,7 @@ class TokenType(Enum):
   # Identifiers and literals
   IDENT = auto()
   INT = auto()
+  STRING = auto()
 
   # Punctuation
   COLON = auto()

@@ -18,6 +18,7 @@ from .ast import (
   IntLiteral,
   ReturnStmt,
   BoolLiteral,
+  StringLiteral,
 )
 
 
@@ -70,7 +71,7 @@ class TypeChecker:
 
   def _check_type(self, name: str) -> None:
     """Verify that a type name is valid."""
-    if name not in ("i64", "bool"):
+    if name not in ("i64", "bool", "str"):
       raise TypeError(f"Unknown type '{name}'")
 
   def check(self, program: Program) -> None:
@@ -165,6 +166,9 @@ class TypeChecker:
       case BoolLiteral(_):
         return "bool"
 
+      case StringLiteral(_):
+        return "str"
+
       case VarExpr(name):
         return self._lookup_var(name)
 
@@ -214,6 +218,15 @@ class TypeChecker:
         raise TypeError(f"Unknown unary operator '{op}'")
 
       case CallExpr(name, args):
+        # Special case: print accepts i64 or str
+        if name == "print":
+          if len(args) != 1:
+            raise TypeError(f"print() expects 1 argument, got {len(args)}")
+          arg_type = self._check_expr(args[0])
+          if arg_type not in ("i64", "str"):
+            raise TypeError(f"print() expects i64 or str, got {arg_type}")
+          return "i64"
+
         if name not in self.functions:
           raise TypeError(f"Undefined function '{name}'")
 

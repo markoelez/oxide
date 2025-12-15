@@ -31,6 +31,7 @@ fn main() -> i64:
 
 - `i64` - 64-bit signed integer
 - `bool` - boolean (`true` / `false`)
+- `str` - string literals with escape sequences
 
 ### Supported Constructs
 

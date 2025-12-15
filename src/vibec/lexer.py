@@ -82,6 +82,34 @@ class Lexer:
     else:
       self._emit(one_type, self.source[self.pos - 1], line, col)
 
+  def _read_string(self, line: int, col: int) -> None:
+    """Read a string literal with escape sequences."""
+    self._advance()  # consume opening quote
+    chars: list[str] = []
+    while self._current() and self._current() != '"':
+      if self._current() == "\n":
+        raise LexerError("Unterminated string literal", line, col)
+      if self._current() == "\\":
+        self._advance()
+        match self._current():
+          case "n":
+            chars.append("\n")
+          case "t":
+            chars.append("\t")
+          case "\\":
+            chars.append("\\")
+          case '"':
+            chars.append('"')
+          case c:
+            raise LexerError(f"Invalid escape sequence '\\{c}'", self.line, self.column)
+        self._advance()
+      else:
+        chars.append(self._advance())
+    if not self._current():
+      raise LexerError("Unterminated string literal", line, col)
+    self._advance()  # consume closing quote
+    self._emit(TokenType.STRING, "".join(chars), line, col)
+
   def tokenize(self) -> list[Token]:
     """Tokenize the entire source and return a list of tokens."""
     while self.pos < len(self.source):
@@ -106,6 +134,8 @@ class Lexer:
           self._read_while(lambda c: c != "\n")
         case c if c.isdigit():
           self._emit(TokenType.INT, self._read_while(str.isdigit), line, col)
+        case '"':
+          self._read_string(line, col)
         case c if c.isalpha() or c == "_":
           ident = self._read_while(lambda c: c.isalnum() or c == "_")
           self._emit(KEYWORDS.get(ident, TokenType.IDENT), ident, line, col)

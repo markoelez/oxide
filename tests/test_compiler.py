@@ -60,14 +60,16 @@ class TestLexer:
     assert TokenType.GE in types
 
   def test_keywords(self):
-    source = "fn let struct enum match if else while for in range return and or not true false"
+    source = "fn let struct impl enum match self if else while for in range return and or not true false"
     tokens = tokenize(source)
     types = [t.type for t in tokens]
     assert TokenType.FN in types
     assert TokenType.LET in types
     assert TokenType.STRUCT in types
+    assert TokenType.IMPL in types
     assert TokenType.ENUM in types
     assert TokenType.MATCH in types
+    assert TokenType.SELF in types
     assert TokenType.IF in types
     assert TokenType.ELSE in types
     assert TokenType.WHILE in types
@@ -467,6 +469,51 @@ fn main() -> i64:
     assert isinstance(stmt.expr, MatchExpr)
     assert len(stmt.expr.arms) == 2
 
+  def test_impl_block(self):
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn sum(self) -> i64:
+        return self.x + self.y
+
+fn main() -> i64:
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import ImplBlock
+
+    assert len(ast.impls) == 1
+    impl = ast.impls[0]
+    assert isinstance(impl, ImplBlock)
+    assert impl.struct_name == "Point"
+    assert len(impl.methods) == 1
+    assert impl.methods[0].name == "sum"
+
+  def test_impl_self_parameter(self):
+    source = """struct Point:
+    x: i64
+
+impl Point:
+    fn get_x(self) -> i64:
+        return self.x
+
+fn main() -> i64:
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.ast import Parameter, SimpleType
+
+    method = ast.impls[0].methods[0]
+    assert len(method.params) == 1
+    assert isinstance(method.params[0], Parameter)
+    assert method.params[0].name == "self"
+    assert isinstance(method.params[0].type_ann, SimpleType)
+    assert method.params[0].type_ann.name == "Self"
+
 
 class TestChecker:
   def test_type_mismatch(self):
@@ -831,6 +878,53 @@ fn main() -> i64:
     from vibec.checker import TypeError
 
     with pytest.raises(TypeError, match="Non-exhaustive match"):
+      check(ast)
+
+  def test_impl_valid(self):
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn sum(self) -> i64:
+        return self.x + self.y
+
+fn main() -> i64:
+    let p: Point = Point { x: 10, y: 20 }
+    return p.sum()
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
+  def test_impl_unknown_struct(self):
+    source = """impl Unknown:
+    fn foo(self) -> i64:
+        return 0
+
+fn main() -> i64:
+    return 0
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="unknown type 'Unknown'"):
+      check(ast)
+
+  def test_impl_method_not_found(self):
+    source = """struct Point:
+    x: i64
+
+fn main() -> i64:
+    let p: Point = Point { x: 10 }
+    return p.nonexistent()
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError):
       check(ast)
 
 
@@ -1310,3 +1404,73 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 109  # 10 + 99
+
+  def test_impl_basic(self):
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn sum(self) -> i64:
+        return self.x + self.y
+
+fn main() -> i64:
+    let p: Point = Point { x: 10, y: 20 }
+    return p.sum()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30
+
+  def test_impl_with_args(self):
+    source = """struct Counter:
+    value: i64
+
+impl Counter:
+    fn add(self, n: i64) -> i64:
+        return self.value + n
+
+fn main() -> i64:
+    let c: Counter = Counter { value: 100 }
+    return c.add(42)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 142
+
+  def test_impl_multiple_methods(self):
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn get_x(self) -> i64:
+        return self.x
+    fn get_y(self) -> i64:
+        return self.y
+    fn sum(self) -> i64:
+        return self.x + self.y
+
+fn main() -> i64:
+    let p: Point = Point { x: 5, y: 15 }
+    let a: i64 = p.get_x()
+    let b: i64 = p.get_y()
+    let c: i64 = p.sum()
+    return a + b + c
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 40  # 5 + 15 + 20
+
+  def test_impl_method_chain(self):
+    source = """struct Value:
+    n: i64
+
+impl Value:
+    fn get(self) -> i64:
+        return self.n
+
+fn main() -> i64:
+    let v1: Value = Value { n: 10 }
+    let v2: Value = Value { n: 20 }
+    return v1.get() + v2.get()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30

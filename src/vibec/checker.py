@@ -132,12 +132,16 @@ class TypeChecker:
     self.structs: dict[str, StructInfo] = {}
     # Enum definitions: name -> EnumInfo
     self.enums: dict[str, EnumInfo] = {}
+    # Struct methods: struct_name -> method_name -> FunctionSignature
+    self.struct_methods: dict[str, dict[str, FunctionSignature]] = {}
     # Function signatures: name -> signature
     self.functions: dict[str, FunctionSignature] = dict(self.BUILTINS)
     # Variable scopes: list of (name -> type) dicts
     self.scopes: list[dict[str, str]] = []
     # Current function's return type (for checking return statements)
     self.current_return_type: str | None = None
+    # Current struct type when checking impl methods (for resolving 'Self')
+    self.current_impl_type: str | None = None
 
   def _enter_scope(self) -> None:
     self.scopes.append({})
@@ -162,6 +166,9 @@ class TypeChecker:
       case SimpleType(name):
         if name in ("i64", "bool", "str"):
           return name
+        # Handle 'Self' type in impl blocks
+        if name == "Self" and self.current_impl_type is not None:
+          return self.current_impl_type
         if name in self.structs:
           return name  # Struct type
         if name in self.enums:
@@ -218,7 +225,27 @@ class TypeChecker:
         variants[variant.name] = payload_type
       self.enums[enum.name] = EnumInfo(variants)
 
-    # Third pass: register all function signatures
+    # Third pass: register impl block methods
+    for impl in program.impls:
+      if impl.struct_name not in self.structs:
+        raise TypeError(f"Cannot implement methods for unknown type '{impl.struct_name}'")
+      if impl.struct_name not in self.struct_methods:
+        self.struct_methods[impl.struct_name] = {}
+
+      self.current_impl_type = impl.struct_name
+      for method in impl.methods:
+        ret_type = self._check_type_ann(method.return_type)
+        param_types: list[str] = []
+        for param in method.params:
+          param_types.append(self._check_type_ann(param.type_ann))
+
+        if method.name in self.struct_methods[impl.struct_name]:
+          raise TypeError(f"Method '{method.name}' already defined for '{impl.struct_name}'")
+
+        self.struct_methods[impl.struct_name][method.name] = FunctionSignature(tuple(param_types), ret_type)
+      self.current_impl_type = None
+
+    # Fourth pass: register all function signatures
     for func in program.functions:
       ret_type = self._check_type_ann(func.return_type)
       param_types: list[str] = []
@@ -234,7 +261,14 @@ class TypeChecker:
     if "main" not in self.functions:
       raise TypeError("No 'main' function defined")
 
-    # Fourth pass: check function bodies
+    # Fifth pass: check impl method bodies
+    for impl in program.impls:
+      self.current_impl_type = impl.struct_name
+      for method in impl.methods:
+        self._check_function(method)
+      self.current_impl_type = None
+
+    # Sixth pass: check function bodies
     for func in program.functions:
       self._check_function(func)
 
@@ -596,6 +630,25 @@ class TypeChecker:
         return "i64"
       else:
         raise TypeError(f"Unknown array method '{method}'")
+
+    elif target_type in self.struct_methods:
+      # Struct method call
+      methods = self.struct_methods[target_type]
+      if method not in methods:
+        raise TypeError(f"Struct '{target_type}' has no method '{method}'")
+      sig = methods[method]
+      # First parameter should be 'self' (the struct type)
+      if not sig.param_types or sig.param_types[0] != target_type:
+        raise TypeError(f"Method '{method}' does not take self parameter")
+      # Check remaining arguments (skip self)
+      expected_params = sig.param_types[1:]
+      if len(args) != len(expected_params):
+        raise TypeError(f"Method '{method}' expects {len(expected_params)} arguments, got {len(args)}")
+      for i, (arg, expected_type) in enumerate(zip(args, expected_params)):
+        arg_type = self._check_expr(arg)
+        if arg_type != expected_type:
+          raise TypeError(f"Argument {i + 1} of '{method}' expects {expected_type}, got {arg_type}")
+      return sig.return_type
 
     else:
       raise TypeError(f"Cannot call method on type {target_type}")

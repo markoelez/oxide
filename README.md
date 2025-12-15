@@ -14,10 +14,14 @@ enum Option:
     Some(i64)
     None
 
-# Structs
+# Structs with impl blocks
 struct Point:
     x: i64
     y: i64
+
+impl Point:
+    fn sum(self) -> i64:
+        return self.x + self.y
 
 fn unwrap_or(opt: Option, default: i64) -> i64:
     match opt:
@@ -31,9 +35,9 @@ fn main() -> i64:
     let x: Option = Option::Some(42)
     let result: i64 = unwrap_or(x, 0)
 
-    # Structs
+    # Structs and methods
     let p: Point = Point { x: 10, y: 20 }
-    p.x = 100
+    print(p.sum())  # Method call
 
     # Arrays, vectors, tuples
     let arr: [i64; 3] = [1, 2, 3]
@@ -53,7 +57,7 @@ fn factorial(n: i64) -> i64:
     return n * factorial(n - 1)
 ```
 
-**Supported:** enums with `match`, functions, structs, tuples `(T1, T2)`, arrays `[T; N]`, vectors `vec[T]`, `if`/`else`, `while`, `for i in range()`, arithmetic, comparisons, logical ops, `print()`
+**Supported:** enums with `match`, functions, structs with `impl` methods, tuples `(T1, T2)`, arrays `[T; N]`, vectors `vec[T]`, `if`/`else`, `while`, `for i in range()`, arithmetic, comparisons, logical ops, `print()`
 
 ## Architecture
 

@@ -334,9 +334,18 @@ class EnumDef:
 
 
 @dataclass(frozen=True, slots=True)
+class ImplBlock:
+  """Implementation block: impl StructName: fn method(self, ...) -> ..."""
+
+  struct_name: str
+  methods: tuple[Function, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Program:
-  """Root node containing structs, enums, and functions."""
+  """Root node containing structs, enums, impl blocks, and functions."""
 
   structs: tuple[StructDef, ...]
   enums: tuple[EnumDef, ...]
+  impls: tuple[ImplBlock, ...]
   functions: tuple[Function, ...]

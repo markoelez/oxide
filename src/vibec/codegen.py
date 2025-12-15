@@ -114,6 +114,8 @@ class CodeGenerator:
     self.structs: dict[str, list[tuple[str, str]]] = {}
     # Enum definitions: name -> dict of variant_name -> (tag, has_payload)
     self.enums: dict[str, dict[str, tuple[int, bool]]] = {}
+    # Struct methods: struct_name -> method_name -> mangled_function_name
+    self.struct_methods: dict[str, dict[str, str]] = {}
 
   def _emit(self, line: str) -> None:
     self.output.append(line)
@@ -244,8 +246,20 @@ class CodeGenerator:
         variants[variant.name] = (i, has_payload)
       self.enums[enum.name] = variants
 
+    # Register struct methods (with mangled names)
+    for impl in program.impls:
+      if impl.struct_name not in self.struct_methods:
+        self.struct_methods[impl.struct_name] = {}
+      for method in impl.methods:
+        mangled_name = f"{impl.struct_name}_{method.name}"
+        self.struct_methods[impl.struct_name][method.name] = mangled_name
+
     # First pass: collect all string literals
     self._collect_strings(program)
+    # Also collect from impl methods
+    for impl in program.impls:
+      for method in impl.methods:
+        self._collect_strings_from_stmts(method.body)
 
     # Data section
     self._emit(".section __DATA,__data")
@@ -264,6 +278,12 @@ class CodeGenerator:
     self._emit(".section __TEXT,__text")
     self._emit(".globl _main")
     self._emit("")
+
+    # Generate impl block methods
+    for impl in program.impls:
+      for method in impl.methods:
+        mangled_name = f"{impl.struct_name}_{method.name}"
+        self._gen_function(method, mangled_name, impl.struct_name)
 
     for func in program.functions:
       self._gen_function(func)
@@ -311,28 +331,37 @@ class CodeGenerator:
       case _:
         return 1
 
-  def _gen_function(self, func: Function) -> None:
-    """Generate assembly for a function."""
+  def _gen_function(self, func: Function, mangled_name: str | None = None, impl_struct: str | None = None) -> None:
+    """Generate assembly for a function or method."""
     self.locals = {}
-    self.current_func_name = func.name
+    func_label = mangled_name if mangled_name else func.name
+    self.current_func_name = func_label
     self.next_slot = 0
 
     # Calculate frame size: params + local variables
     # Each slot is 8 bytes, plus 16 for saved fp/lr
     # Note: enums take 2 slots each for both storage and registers
-    num_param_slots = sum(self._slots_for_type(p.type_ann) for p in func.params)
+    # For methods, 'self' is treated as a struct (multiple slots)
+    num_param_slots = 0
+    for p in func.params:
+      if p.name == "self" and impl_struct and impl_struct in self.structs:
+        num_param_slots += len(self.structs[impl_struct])
+      else:
+        num_param_slots += self._slots_for_type(p.type_ann)
     num_locals = self._count_locals(func.body)
     total_slots = num_param_slots + num_locals
 
-    # Frame size: 16 (saved fp/lr) + slots, 16-byte aligned
+    # Frame size: 16 (saved fp/lr) + 16 (base offset) + slots, 16-byte aligned
+    # Locals are at [x29-16], [x29-24], etc., growing downward
+    # With x29 = sp + frame_size - 16, we need frame_size >= 32 + (n-1)*8
     slots_size = total_slots * 8
-    self.frame_size = 16 + ((slots_size + 15) & ~15)
-    if self.frame_size < 32:
-      self.frame_size = 32  # Minimum for some temp storage
+    self.frame_size = (32 + slots_size + 15) & ~15
+    if self.frame_size < 48:
+      self.frame_size = 48  # Minimum for temp storage and proper alignment
 
     # Function label (prefix with _ for macOS)
     self._emit(".align 4")
-    self._emit(f"_{func.name}:")
+    self._emit(f"_{func_label}:")
 
     # Prologue: allocate full frame and save fp/lr at top
     self._emit(f"    sub sp, sp, #{self.frame_size}")
@@ -342,9 +371,23 @@ class CodeGenerator:
     # Store parameters (first 8 in x0-x7)
     # Parameters go at [x29 - 16], [x29 - 24], etc.
     # Enum parameters use 2 registers (tag, payload)
+    # Self parameter (struct) uses multiple registers
     reg_idx = 0
     for param in func.params:
       offset = -16 - (self.next_slot * 8)
+
+      # Handle 'self' parameter specially in methods
+      if param.name == "self" and impl_struct and impl_struct in self.structs:
+        type_str = impl_struct
+        self.locals[param.name] = (offset, type_str)
+        num_fields = len(self.structs[impl_struct])
+        for i in range(num_fields):
+          if reg_idx < 8:
+            self._emit(f"    str x{reg_idx}, [x29, #{offset - i * 8}]")
+          reg_idx += 1
+        self.next_slot += num_fields
+        continue
+
       type_str = type_to_str(param.type_ann)
       self.locals[param.name] = (offset, type_str)
       slots_needed = self._slots_for_type(param.type_ann)
@@ -368,7 +411,7 @@ class CodeGenerator:
       self._gen_stmt(stmt)
 
     # Epilogue
-    self._emit(f"_{func.name}_epilogue:")
+    self._emit(f"_{func_label}_epilogue:")
     self._emit(f"    ldp x29, x30, [sp, #{self.frame_size - 16}]")
     self._emit(f"    add sp, sp, #{self.frame_size}")
     self._emit("    ret")
@@ -997,6 +1040,34 @@ class CodeGenerator:
               # len(): return list.len
               self._emit(f"    ldr x9, [x29, #{offset}]")  # List base
               self._emit("    ldr x0, [x9, #8]")  # Length
+
+        elif type_str in self.struct_methods and method in self.struct_methods[type_str]:
+          # Struct method call
+          mangled_name = self.struct_methods[type_str][method]
+          struct_fields = self.structs[type_str]
+
+          # Push all arguments (including self) to stack in reverse order
+          # First, push the explicit arguments in reverse
+          for arg in reversed(args):
+            self._gen_expr(arg)
+            self._emit("    str x0, [sp, #-16]!")
+
+          # Then push self (struct fields in reverse order)
+          for i in range(len(struct_fields) - 1, -1, -1):
+            self._emit(f"    ldr x0, [x29, #{offset - i * 8}]")
+            self._emit("    str x0, [sp, #-16]!")
+
+          # Pop into registers: self fields first, then args
+          reg_idx = 0
+          for _ in struct_fields:
+            self._emit(f"    ldr x{reg_idx}, [sp], #16")
+            reg_idx += 1
+          for _ in args:
+            self._emit(f"    ldr x{reg_idx}, [sp], #16")
+            reg_idx += 1
+
+          # Call the method
+          self._emit(f"    bl _{mangled_name}")
 
         else:
           # Array methods

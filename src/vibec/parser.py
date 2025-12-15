@@ -15,6 +15,7 @@ from .ast import (
   Function,
   MatchArm,
   ArrayType,
+  ImplBlock,
   IndexExpr,
   MatchExpr,
   Parameter,
@@ -131,6 +132,7 @@ class Parser:
     """Parse the entire program."""
     structs: list[StructDef] = []
     enums: list[EnumDef] = []
+    impls: list[ImplBlock] = []
     functions: list[Function] = []
     self._skip_newlines()
 
@@ -139,13 +141,15 @@ class Parser:
         structs.append(self._parse_struct())
       elif self._check(TokenType.ENUM):
         enums.append(self._parse_enum())
+      elif self._check(TokenType.IMPL):
+        impls.append(self._parse_impl())
       elif self._check(TokenType.FN):
         functions.append(self._parse_function())
       else:
-        raise ParseError("Expected 'struct', 'enum', or 'fn'", self._current())
+        raise ParseError("Expected 'struct', 'enum', 'impl', or 'fn'", self._current())
       self._skip_newlines()
 
-    return Program(tuple(structs), tuple(enums), tuple(functions))
+    return Program(tuple(structs), tuple(enums), tuple(impls), tuple(functions))
 
   def _parse_struct(self) -> StructDef:
     """Parse: struct Name: INDENT field: type ... DEDENT"""
@@ -194,6 +198,24 @@ class Parser:
     self._expect(TokenType.DEDENT, "Expected dedent")
     return EnumDef(name_token.value, tuple(variants))
 
+  def _parse_impl(self) -> ImplBlock:
+    """Parse: impl StructName: INDENT fn method(self, ...) -> type: ... DEDENT"""
+    self._expect(TokenType.IMPL, "Expected 'impl'")
+    struct_name = self._expect(TokenType.IDENT, "Expected struct name")
+    self._expect(TokenType.COLON, "Expected ':'")
+    self._expect(TokenType.NEWLINE, "Expected newline after ':'")
+    self._expect(TokenType.INDENT, "Expected indented block")
+
+    methods: list[Function] = []
+    while not self._check(TokenType.DEDENT, TokenType.EOF):
+      self._skip_newlines()
+      if self._check(TokenType.DEDENT, TokenType.EOF):
+        break
+      methods.append(self._parse_function())
+
+    self._expect(TokenType.DEDENT, "Expected dedent")
+    return ImplBlock(struct_name.value, tuple(methods))
+
   def _parse_function(self) -> Function:
     """Parse: fn name(params) -> type: INDENT body DEDENT"""
     self._expect(TokenType.FN, "Expected 'fn'")
@@ -230,7 +252,13 @@ class Parser:
     return params
 
   def _parse_parameter(self) -> Parameter:
-    """Parse: name: type"""
+    """Parse: name: type or just 'self' for methods."""
+    # Handle 'self' parameter (no type annotation needed)
+    if self._check(TokenType.SELF):
+      self._advance()
+      # Use placeholder type "Self" - type checker will resolve it
+      return Parameter("self", SimpleType("Self"))
+
     name_token = self._expect(TokenType.IDENT, "Expected parameter name")
     self._expect(TokenType.COLON, "Expected ':'")
     type_ann = self._parse_type()
@@ -476,6 +504,11 @@ class Parser:
     elif token.type == TokenType.MATCH:
       # Match expression
       return self._parse_match()
+
+    elif token.type == TokenType.SELF:
+      # Self reference in method
+      self._advance()
+      return self._parse_postfix(VarExpr("self"))
 
     elif token.type == TokenType.IDENT:
       name = token.value

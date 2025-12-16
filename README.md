@@ -39,6 +39,25 @@ oxide source.ox --keep-asm
 - macOS with ARM64 (Apple Silicon)
 - Xcode Command Line Tools (for `as` and `ld`)
 
+## Architecture
+
+The compiler is structured as follows:
+
+```
+Source Code → Lexer → Parser → Type Checker → Code Generator → ARM64 Assembly
+```
+
+### Modules
+
+- `tokens.py` - Token definitions
+- `lexer.py` - Tokenization with Python-style indentation handling
+- `ast.py` - AST node dataclasses
+- `parser.py` - Recursive descent parser with precedence climbing
+- `checker.py` - Type checking with scoped symbol tables
+- `codegen.py` - ARM64 assembly generation for macOS
+- `compiler.py` - Pipeline orchestration
+- `cli.py` - Command-line interface
+
 ## Language Features
 
 Oxide combines Python's indentation-based blocks with Rust's explicit type annotations:
@@ -475,27 +494,6 @@ fn main() -> i64:
 ```
 
 **Supported:** operator overloading (`__add__`, `__eq__`, etc.), generics (structs, enums, functions, impl blocks) with type inference, type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, slice syntax (`v[1:3]`, `v[::2]`, negative indices), chained comparisons (`0 < x < 10`), pattern guards (`Some(x) if x > 0:`), `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
-
-
-## Architecture
-
-The compiler is structured as follows:
-
-```
-Source Code → Lexer → Parser → Type Checker → Code Generator → ARM64 Assembly
-```
-
-### Modules
-
-- `tokens.py` - Token definitions
-- `lexer.py` - Tokenization with Python-style indentation handling
-- `ast.py` - AST node dataclasses
-- `parser.py` - Recursive descent parser with precedence climbing
-- `checker.py` - Type checking with scoped symbol tables
-- `codegen.py` - ARM64 assembly generation for macOS
-- `compiler.py` - Pipeline orchestration
-- `cli.py` - Command-line interface
-
 
 ## Todo
 

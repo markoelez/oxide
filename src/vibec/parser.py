@@ -27,6 +27,7 @@ from .ast import (
   IndexExpr,
   MatchExpr,
   Parameter,
+  SliceExpr,
   StructDef,
   TupleType,
   TypeAlias,
@@ -881,14 +882,12 @@ class Parser:
     return DictComprehension(key_expr, value_expr, var_token.value, start_expr, end_expr, condition)
 
   def _parse_postfix(self, expr: Expr) -> Expr:
-    """Parse postfix operations: indexing [i], field access .field, tuple index .0, method calls .method(), try ?."""
+    """Parse postfix operations: indexing [i], slicing [i:j], field access .field, tuple index .0, method calls .method(), try ?."""
     while True:
       if self._check(TokenType.LBRACKET):
-        # Index expression: expr[index]
+        # Index or slice expression: expr[index] or expr[start:stop:step]
         self._advance()
-        index = self._parse_expression()
-        self._expect(TokenType.RBRACKET, "Expected ']'")
-        expr = IndexExpr(expr, index)
+        expr = self._parse_index_or_slice(expr)
       elif self._check(TokenType.DOT):
         # Field access, tuple index, or method call
         self._advance()
@@ -918,6 +917,96 @@ class Parser:
       else:
         break
     return expr
+
+  def _parse_index_or_slice(self, target: Expr) -> Expr:
+    """Parse index [i] or slice [start:stop:step] expression after opening bracket.
+
+    Supports Python-style slice syntax:
+      - arr[i]       -> IndexExpr (regular index)
+      - arr[:]       -> SliceExpr (full slice)
+      - arr[start:]  -> SliceExpr (from start to end)
+      - arr[:stop]   -> SliceExpr (from beginning to stop)
+      - arr[start:stop] -> SliceExpr (from start to stop)
+      - arr[::step]  -> SliceExpr (full slice with step)
+      - arr[start:stop:step] -> SliceExpr (full slice with step)
+
+    Note: '::' is lexed as COLONCOLON, so we need to handle that specially.
+    """
+    # Check for [::step] - full slice with step (COLONCOLON is lexed as single token)
+    if self._check(TokenType.COLONCOLON):
+      self._advance()  # consume '::'
+      start: Expr | None = None
+      stop: Expr | None = None
+      step: Expr | None = None
+
+      # Check for step value
+      if not self._check(TokenType.RBRACKET):
+        step = self._parse_expression()
+
+      self._expect(TokenType.RBRACKET, "Expected ']'")
+      return SliceExpr(target, start, stop, step)
+
+    # Check for empty slice [:...]
+    if self._check(TokenType.COLON):
+      # It's a slice starting with :
+      self._advance()  # consume first ':'
+      start = None
+      stop = None
+      step = None
+
+      # Check for :step (was written as ::step but already handled COLONCOLON above)
+      # This handles [:stop] or [:stop:step] or [:]
+      if not self._check(TokenType.COLON, TokenType.RBRACKET):
+        stop = self._parse_expression()
+
+      # Check for step
+      if self._check(TokenType.COLON):
+        self._advance()
+        if not self._check(TokenType.RBRACKET):
+          step = self._parse_expression()
+
+      self._expect(TokenType.RBRACKET, "Expected ']'")
+      return SliceExpr(target, start, stop, step)
+
+    # Parse first expression (could be index or slice start)
+    first = self._parse_expression()
+
+    # Check if this is a slice (colon or coloncolon follows)
+    if self._check(TokenType.COLONCOLON):
+      # [start::step]
+      self._advance()  # consume '::'
+      start = first
+      stop = None
+      step = None
+
+      if not self._check(TokenType.RBRACKET):
+        step = self._parse_expression()
+
+      self._expect(TokenType.RBRACKET, "Expected ']'")
+      return SliceExpr(target, start, stop, step)
+
+    if self._check(TokenType.COLON):
+      self._advance()  # consume ':'
+      start = first
+      stop = None
+      step = None
+
+      # Check for stop value
+      if not self._check(TokenType.COLON, TokenType.RBRACKET):
+        stop = self._parse_expression()
+
+      # Check for step
+      if self._check(TokenType.COLON):
+        self._advance()
+        if not self._check(TokenType.RBRACKET):
+          step = self._parse_expression()
+
+      self._expect(TokenType.RBRACKET, "Expected ']'")
+      return SliceExpr(target, start, stop, step)
+
+    # Regular index expression
+    self._expect(TokenType.RBRACKET, "Expected ']'")
+    return IndexExpr(target, first)
 
   def _parse_struct_literal(self, name: str, type_args: tuple[TypeAnnotation, ...] = ()) -> StructLiteral:
     """Parse struct literal: Name { field: value, ... } or Name<T, U> { field: value, ... }."""

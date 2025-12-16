@@ -27,6 +27,7 @@ from .ast import (
   ImplBlock,
   IndexExpr,
   MatchExpr,
+  SliceExpr,
   StructDef,
   TupleType,
   UnaryExpr,
@@ -1486,6 +1487,35 @@ class TypeChecker:
         if elem_type is None:
           raise TypeError(f"Cannot index into type {target_type}")
         return elem_type
+
+      case SliceExpr(target, start, stop, step):
+        target_type = self._check_expr(target)
+
+        # Check slice indices are i64 (if provided)
+        if start is not None:
+          start_type = self._check_expr(start)
+          if start_type != "i64":
+            raise TypeError(f"Slice start must be i64, got {start_type}")
+        if stop is not None:
+          stop_type = self._check_expr(stop)
+          if stop_type != "i64":
+            raise TypeError(f"Slice stop must be i64, got {stop_type}")
+        if step is not None:
+          step_type = self._check_expr(step)
+          if step_type != "i64":
+            raise TypeError(f"Slice step must be i64, got {step_type}")
+
+        # Slicing returns a vec of the element type
+        if is_array_type(target_type):
+          elem_type = get_element_type(target_type)
+          return f"vec[{elem_type}]"
+        elif is_vec_type(target_type):
+          elem_type = get_element_type(target_type)
+          return f"vec[{elem_type}]"
+        elif target_type == "str":
+          return "str"
+        else:
+          raise TypeError(f"Cannot slice type {target_type}")
 
       case MethodCallExpr(target, method, args):
         target_type = self._check_expr(target)

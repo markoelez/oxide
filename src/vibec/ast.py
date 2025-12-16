@@ -151,6 +151,16 @@ class IndexExpr:
 
 
 @dataclass(frozen=True, slots=True)
+class SliceExpr:
+  """Slice expression like arr[1:3], arr[:3], arr[1:], arr[::2]."""
+
+  target: "Expr"
+  start: "Expr | None"  # None means from beginning
+  stop: "Expr | None"  # None means to end
+  step: "Expr | None"  # None means step of 1
+
+
+@dataclass(frozen=True, slots=True)
 class MethodCallExpr:
   """Method call like list.push(x) or list.len()."""
 
@@ -313,6 +323,7 @@ Expr = (
   | CallExpr
   | ArrayLiteral
   | IndexExpr
+  | SliceExpr
   | MethodCallExpr
   | StructLiteral
   | FieldAccessExpr

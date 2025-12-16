@@ -169,6 +169,43 @@ fn main() -> i64:
     0
 ```
 
+**Python-style Slice Syntax:**
+```
+fn main() -> i64:
+    let v: vec[i64] = [x * 10 for x in range(0, 10)]
+    # v = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+    
+    # Basic slice: [start:stop] - elements from index 2 to 5 (exclusive)
+    let slice1: vec[i64] = v[2:5]  # [20, 30, 40]
+    
+    # From start: [:stop] - first 3 elements
+    let first_three: vec[i64] = v[:3]  # [0, 10, 20]
+    
+    # To end: [start:] - elements from index 7 onwards  
+    let last_three: vec[i64] = v[7:]  # [70, 80, 90]
+    
+    # Full copy: [:] - copy entire vector
+    let copy: vec[i64] = v[:]
+    
+    # With step: [::step] - every 2nd element
+    let evens: vec[i64] = v[::2]  # [0, 20, 40, 60, 80]
+    
+    # Full form: [start:stop:step]
+    let middle_evens: vec[i64] = v[2:8:2]  # [20, 40, 60]
+    
+    # Negative indices (from end)
+    let last_two: vec[i64] = v[-2:]  # [80, 90]
+    let without_last_two: vec[i64] = v[:-2]  # first 8 elements
+    
+    # Array slicing (returns a vec)
+    let arr: [i64; 5] = [1, 2, 3, 4, 5]
+    let arr_slice: vec[i64] = arr[1:4]  # [2, 3, 4]
+    
+    # Chain with other operations
+    let sum: i64 = v[0:5].sum()  # 0 + 10 + 20 + 30 + 40 = 100
+    0
+```
+
 **Functional Iterator Methods:**
 ```
 fn main() -> i64:
@@ -229,7 +266,7 @@ fn main() -> i64:
     return 0
 ```
 
-**Supported:** generics (structs, enums, functions, impl blocks), type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
+**Supported:** generics (structs, enums, functions, impl blocks), type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, slice syntax (`v[1:3]`, `v[::2]`, negative indices), `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture
@@ -293,7 +330,6 @@ vibec source.vb --keep-asm
 - Chained comparisons (python)
 - Pattern guards (rust)
 - Traits (rust)
-- Slice syntax (python)
 
 ## License
 

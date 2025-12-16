@@ -33,6 +33,7 @@ examples/hashmaps
 examples/constants
 examples/type_aliases
 examples/generics
+examples/slices
 
 # uv lock file
 uv.lock

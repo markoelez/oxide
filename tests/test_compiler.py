@@ -3761,3 +3761,105 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 15
+
+  # === Slice tests ===
+
+  def test_vec_slice_basic(self):
+    """Test basic vec slicing [start:stop]."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x + 1 for x in range(0, 5)]
+    let s: vec[i64] = v[1:4]
+    s[0] + s[1] + s[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 9  # 2 + 3 + 4
+
+  def test_vec_slice_from_start(self):
+    """Test vec slice from start [:stop]."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [(x + 1) * 10 for x in range(0, 4)]
+    let s: vec[i64] = v[:2]
+    s[0] + s[1]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30  # 10 + 20
+
+  def test_vec_slice_to_end(self):
+    """Test vec slice to end [start:]."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x + 1 for x in range(0, 4)]
+    let s: vec[i64] = v[2:]
+    s[0] + s[1]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 7  # 3 + 4
+
+  def test_vec_slice_full(self):
+    """Test full vec slice [:]."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [(x + 1) * 5 for x in range(0, 3)]
+    let s: vec[i64] = v[:]
+    s.len()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 3
+
+  def test_vec_slice_with_step(self):
+    """Test vec slice with step [::step]."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x + 1 for x in range(0, 6)]
+    let s: vec[i64] = v[::2]
+    s[0] + s[1] + s[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 9  # 1 + 3 + 5
+
+  def test_vec_slice_start_stop_step(self):
+    """Test vec slice with start, stop, and step [start:stop:step]."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x for x in range(0, 10)]
+    let s: vec[i64] = v[1:8:2]
+    s[0] + s[1] + s[2] + s[3]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 16  # 1 + 3 + 5 + 7
+
+  def test_vec_slice_empty(self):
+    """Test empty slice when start >= stop."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x + 1 for x in range(0, 3)]
+    let s: vec[i64] = v[2:1]
+    s.len()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 0
+
+  def test_array_slice_basic(self):
+    """Test slicing a fixed-size array."""
+    source = """fn main() -> i64:
+    let arr: [i64; 5] = [10, 20, 30, 40, 50]
+    let s: vec[i64] = arr[1:4]
+    s[0] + s[1] + s[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 90  # 20 + 30 + 40
+
+  def test_slice_negative_start(self):
+    """Test slice with negative start index."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x + 1 for x in range(0, 5)]
+    let s: vec[i64] = v[-2:]
+    s[0] + s[1]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 9  # 4 + 5
+
+  def test_slice_negative_stop(self):
+    """Test slice with negative stop index."""
+    source = """fn main() -> i64:
+    let v: vec[i64] = [x + 1 for x in range(0, 5)]
+    let s: vec[i64] = v[:-2]
+    s[0] + s[1] + s[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 6  # 1 + 2 + 3

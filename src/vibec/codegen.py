@@ -29,6 +29,7 @@ from .ast import (
   IndexExpr,
   MatchExpr,
   Parameter,
+  SliceExpr,
   TupleType,
   UnaryExpr,
   WhileStmt,
@@ -290,6 +291,14 @@ class CodeGenerator:
       case IndexExpr(target, index):
         self._collect_strings_from_expr(target)
         self._collect_strings_from_expr(index)
+      case SliceExpr(target, start, stop, step):
+        self._collect_strings_from_expr(target)
+        if start is not None:
+          self._collect_strings_from_expr(start)
+        if stop is not None:
+          self._collect_strings_from_expr(stop)
+        if step is not None:
+          self._collect_strings_from_expr(step)
       case MethodCallExpr(target, _, args):
         self._collect_strings_from_expr(target)
         for arg in args:
@@ -1295,6 +1304,9 @@ class CodeGenerator:
             self._emit("    ldr x0, [sp], #16")  # Restore target
             self._emit("    ldr x0, [x0, x1, lsl #3]")
 
+      case SliceExpr(target, start_expr, stop_expr, step_expr):
+        self._gen_slice_expr(target, start_expr, stop_expr, step_expr)
+
       case MethodCallExpr(target, method, args):
         self._gen_method_call(target, method, args)
 
@@ -2191,6 +2203,145 @@ class CodeGenerator:
 
     # Call through function pointer
     self._emit("    blr x9")
+
+  def _gen_slice_expr(self, target: Expr, start_expr: Expr | None, stop_expr: Expr | None, step_expr: Expr | None) -> None:
+    """Generate code for slice expressions like arr[1:3] or vec[::2].
+
+    Returns a new vec containing the sliced elements.
+    Stack layout during computation:
+      [sp+40]: step (or 1 if not provided)
+      [sp+32]: stop (or len if not provided)
+      [sp+24]: start (or 0 if not provided)
+      [sp+16]: source length
+      [sp+8]:  source data pointer
+      [sp+0]:  scratch space
+    """
+    slice_label = self._new_label("slice")
+    slice_loop = f"{slice_label}_loop"
+    slice_done = f"{slice_label}_done"
+
+    # Evaluate target and get type info
+    match target:
+      case VarExpr(name):
+        offset, type_str = self.locals[name]
+
+        if is_vec_type(type_str):
+          # Vec: load base pointer and length from header
+          self._emit(f"    ldr x0, [x29, #{offset}]")  # Vec pointer
+          self._emit("    ldr x2, [x0, #8]")  # Length
+          self._emit("    add x1, x0, #16")  # Data pointer (skip header)
+          is_vec = True
+        elif is_array_type(type_str):
+          # Array: compute stack address and use compile-time length
+          array_size = get_array_size(type_str)
+          self._emit(f"    add x1, x29, #{offset}")  # Data pointer (stack address)
+          self._emit(f"    mov x2, #{array_size}")  # Length (compile-time)
+          is_vec = False
+        else:
+          # String slicing not yet supported in codegen
+          raise NotImplementedError(f"Slice codegen for type {type_str} not implemented")
+      case _:
+        # For complex targets, evaluate and assume vec
+        self._gen_expr(target)
+        self._emit("    ldr x2, [x0, #8]")  # Length
+        self._emit("    add x1, x0, #16")  # Data pointer
+        is_vec = True
+
+    # Save source data ptr (x1) and length (x2) on stack
+    self._emit("    str x1, [sp, #-48]!")  # Reserve 48 bytes, store data ptr at [sp]
+    self._emit("    str x2, [sp, #8]")  # Length at [sp+8]
+
+    # Compute start (default 0)
+    if start_expr is not None:
+      self._gen_expr(start_expr)
+      # Handle negative indices
+      self._emit("    cmp x0, #0")
+      self._emit(f"    b.ge {slice_label}_start_ok")
+      self._emit("    ldr x1, [sp, #8]")  # Load length
+      self._emit("    add x0, x0, x1")  # start = start + len
+      self._emit(f"{slice_label}_start_ok:")
+    else:
+      self._emit("    mov x0, #0")
+    self._emit("    str x0, [sp, #16]")  # Store start at [sp+16]
+
+    # Compute stop (default length)
+    if stop_expr is not None:
+      self._gen_expr(stop_expr)
+      # Handle negative indices
+      self._emit("    cmp x0, #0")
+      self._emit(f"    b.ge {slice_label}_stop_ok")
+      self._emit("    ldr x1, [sp, #8]")  # Load length
+      self._emit("    add x0, x0, x1")  # stop = stop + len
+      self._emit(f"{slice_label}_stop_ok:")
+    else:
+      self._emit("    ldr x0, [sp, #8]")  # Default to length
+    self._emit("    str x0, [sp, #24]")  # Store stop at [sp+24]
+
+    # Compute step (default 1)
+    if step_expr is not None:
+      self._gen_expr(step_expr)
+    else:
+      self._emit("    mov x0, #1")
+    self._emit("    str x0, [sp, #32]")  # Store step at [sp+32]
+
+    # Calculate result length: max(0, (stop - start + step - 1) / step) for positive step
+    # For simplicity, we only support positive step for now
+    self._emit("    ldr x1, [sp, #16]")  # start
+    self._emit("    ldr x2, [sp, #24]")  # stop
+    self._emit("    ldr x3, [sp, #32]")  # step
+    self._emit("    sub x0, x2, x1")  # stop - start
+    self._emit("    cmp x0, #0")
+    self._emit(f"    b.le {slice_label}_empty")
+    # Ceiling division: (stop - start + step - 1) / step
+    self._emit("    add x0, x0, x3")
+    self._emit("    sub x0, x0, #1")
+    self._emit("    sdiv x0, x0, x3")  # Result length
+    self._emit(f"    b {slice_label}_alloc")
+
+    self._emit(f"{slice_label}_empty:")
+    self._emit("    mov x0, #0")  # Empty slice
+
+    # Allocate new vec: 16 (header) + length * 8 (data)
+    self._emit(f"{slice_label}_alloc:")
+    self._emit("    str x0, [sp, #40]")  # Save result length at [sp+40]
+    self._emit("    lsl x0, x0, #3")  # length * 8
+    self._emit("    add x0, x0, #16")  # + header
+    self._emit("    bl _malloc")
+    self._emit("    str x0, [sp, #-16]!")  # Push new vec ptr (now at [sp])
+
+    # Initialize vec header
+    self._emit("    ldr x1, [sp, #56]")  # Result length from [sp+40+16]
+    self._emit("    str x1, [x0]")  # capacity = length
+    self._emit("    str x1, [x0, #8]")  # length
+
+    # Copy loop: iterate with step
+    self._emit("    ldr x4, [sp]")  # New vec ptr
+    self._emit("    add x4, x4, #16")  # New data ptr
+    self._emit("    ldr x5, [sp, #16]")  # Source data ptr
+    self._emit("    ldr x6, [sp, #32]")  # start index
+    self._emit("    ldr x7, [sp, #40]")  # stop index
+    self._emit("    ldr x8, [sp, #48]")  # step
+    self._emit("    mov x9, #0")  # dest index
+
+    self._emit(f"{slice_loop}:")
+    self._emit("    cmp x6, x7")  # Compare current index with stop
+    self._emit(f"    b.ge {slice_done}")
+
+    # For arrays, we need to negate the index (stack grows downward)
+    if not is_vec:
+      self._emit("    neg x10, x6")
+      self._emit("    ldr x10, [x5, x10, lsl #3]")  # Load source[index]
+    else:
+      self._emit("    ldr x10, [x5, x6, lsl #3]")  # Load source[index]
+    self._emit("    str x10, [x4, x9, lsl #3]")  # Store to dest[dest_index]
+
+    self._emit("    add x6, x6, x8")  # index += step
+    self._emit("    add x9, x9, #1")  # dest_index++
+    self._emit(f"    b {slice_loop}")
+
+    self._emit(f"{slice_done}:")
+    self._emit("    ldr x0, [sp]")  # Return new vec ptr
+    self._emit("    add sp, sp, #64")  # Clean up stack (48 + 16)
 
   def _gen_method_call(self, target: Expr, method: str, args: tuple[Expr, ...]) -> None:
     """Generate code for method calls on lists/arrays."""

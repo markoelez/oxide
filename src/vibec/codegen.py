@@ -1256,16 +1256,18 @@ class CodeGenerator:
             self._emit("    cmp x0, #0")
             self._emit("    cset x0, eq")
 
-      case CallExpr(name, args, kwargs):
+      case CallExpr(name, args, kwargs, resolved_name):
+        # Use resolved_name if available (from type inference), otherwise use name
+        func_name = resolved_name if resolved_name else name
         # Resolve kwargs to positional order
-        resolved_args = self._resolve_kwargs_codegen(name, args, kwargs)
-        if name == "print":
+        resolved_args = self._resolve_kwargs_codegen(func_name, args, kwargs)
+        if func_name == "print":
           self._gen_print(resolved_args)
-        elif name in self.locals:
+        elif func_name in self.locals:
           # Closure call - variable holds a function pointer
-          self._gen_closure_call(name, resolved_args)
+          self._gen_closure_call(func_name, resolved_args)
         else:
-          self._gen_call(name, resolved_args)
+          self._gen_call(func_name, resolved_args)
 
       case ArrayLiteral(elements):
         # Array literal outside of let: shouldn't happen after type checking

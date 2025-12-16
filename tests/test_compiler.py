@@ -3689,20 +3689,112 @@ fn main() -> i64:
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 42
 
-  def test_generic_function_missing_type_args_error(self):
-    """Test error when generic function called without type args."""
+  def test_generic_function_cannot_infer_type_args_error(self):
+    """Test error when generic function type cannot be inferred from arguments."""
+    source = """fn make_default<T>() -> T:
+    # Cannot infer T because there are no arguments using T
+    let x: T = 0
+    x
+
+fn main() -> i64:
+    make_default()
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot infer type"):
+      check(ast)
+
+  # === Generic Function Type Inference Tests ===
+
+  def test_generic_function_infer_basic(self):
+    """Test basic type inference for generic function."""
     source = """fn identity<T>(x: T) -> T:
     x
 
 fn main() -> i64:
     identity(42)
 """
-    tokens = tokenize(source)
-    ast = parse(tokens)
-    from vibec.checker import TypeError
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
 
-    with pytest.raises(TypeError, match="requires explicit type arguments"):
-      check(ast)
+  def test_generic_function_infer_bool(self):
+    """Test type inference with bool type."""
+    source = """fn identity<T>(x: T) -> T:
+    x
+
+fn main() -> i64:
+    let b: bool = identity(true)
+    if b:
+        1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1
+
+  def test_generic_function_infer_multiple_params(self):
+    """Test type inference for generic function with multiple type parameters."""
+    source = """fn first<T, U>(a: T, b: U) -> T:
+    a
+
+fn main() -> i64:
+    first(100, true)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100
+
+  def test_generic_function_infer_multiple_calls(self):
+    """Test multiple calls to same generic function with different inferred types."""
+    source = """fn identity<T>(x: T) -> T:
+    x
+
+fn main() -> i64:
+    let a: i64 = identity(10)
+    let b: bool = identity(true)
+    if b:
+        a
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 10
+
+  def test_generic_function_infer_with_computation(self):
+    """Test type inference with expression arguments."""
+    source = """fn double<T>(x: T) -> T:
+    x
+
+fn main() -> i64:
+    double(21 + 21)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_generic_function_infer_nested_call(self):
+    """Test type inference with nested generic function calls."""
+    source = """fn identity<T>(x: T) -> T:
+    x
+
+fn main() -> i64:
+    identity(identity(42))
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_generic_function_infer_mixed_with_explicit(self):
+    """Test mixing inferred and explicit type args across multiple calls."""
+    source = """fn identity<T>(x: T) -> T:
+    x
+
+fn main() -> i64:
+    let a: i64 = identity<i64>(10)
+    let b: i64 = identity(20)
+    a + b
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30
 
   # === Generic Impl Block Tests ===
 

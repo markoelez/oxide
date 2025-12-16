@@ -95,18 +95,22 @@ fn main() -> i64:
 
     print(333)  # Separator
 
-    # === Generic Functions ===
-    print(identity<i64>(77))  # Output: 77
+    # === Generic Functions with Type Inference ===
+    # Type arguments are automatically inferred from the actual arguments
+    print(identity(77))  # T inferred as i64, Output: 77
 
-    let x: i64 = first<i64, bool>(99, false)
+    let x: i64 = first(99, false)  # T=i64, U=bool inferred
     print(x)  # Output: 99
 
-    let y: bool = second<i64, bool>(0, true)
+    let y: bool = second(0, true)  # T=i64, U=bool inferred
     if y:
         print(1)  # Output: 1
 
-    let boxed: Box<i64> = make_box<i64>(123)
+    let boxed: Box<i64> = make_box(123)  # T inferred as i64
     print(boxed.get())  # Output: 123
+
+    # Explicit type args still work if you prefer
+    print(identity<i64>(42))  # Output: 42
 
     print(444)  # Separator
 

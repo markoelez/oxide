@@ -32,11 +32,11 @@ class Compiler:
       # Parsing
       ast = parse(tokens)
 
-      # Type checking
-      type_check_result = check(ast)
+      # Type checking (also transforms AST for type inference)
+      transformed_ast, type_check_result = check(ast)
 
-      # Code generation
-      assembly = generate(ast, type_check_result)
+      # Code generation (uses transformed AST with resolved generic calls)
+      assembly = generate(transformed_ast, type_check_result)
 
       return CompileResult(success=True, assembly=assembly)
 

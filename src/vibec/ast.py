@@ -133,6 +133,7 @@ class CallExpr:
   name: str
   args: tuple["Expr", ...]
   kwargs: tuple[tuple[str, "Expr"], ...] = ()  # (name, value) pairs
+  resolved_name: str | None = None  # Filled by type checker for inferred generic calls
 
 
 @dataclass(frozen=True, slots=True)

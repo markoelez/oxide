@@ -233,7 +233,7 @@ impl Box<T>:
     fn get(self: Box<T>) -> T:
         self.value
 
-# Generic function - requires explicit type args
+# Generic function with type inference
 fn identity<T>(x: T) -> T:
     x
 
@@ -250,10 +250,13 @@ fn main() -> i64:
     let b: Box<i64> = Box<i64> { value: 42 }
     print(b.get())  # 42
     
-    # Generic functions (explicit type args required)
-    print(identity<i64>(100))  # 100
-    let boxed: Box<i64> = make_box<i64>(77)
+    # Generic functions with type inference (types inferred from arguments)
+    print(identity(100))  # T inferred as i64
+    let boxed: Box<i64> = make_box(77)  # T inferred as i64
     print(boxed.get())  # 77
+    
+    # Explicit type args still work
+    let x: i64 = identity<i64>(42)
     
     # Generic enum with pattern matching
     let opt: Option<i64> = Option<i64>::Some(50)
@@ -266,7 +269,7 @@ fn main() -> i64:
     return 0
 ```
 
-**Supported:** generics (structs, enums, functions, impl blocks), type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, slice syntax (`v[1:3]`, `v[::2]`, negative indices), `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
+**Supported:** generics (structs, enums, functions, impl blocks) with type inference, type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, slice syntax (`v[1:3]`, `v[::2]`, negative indices), `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture
@@ -326,7 +329,6 @@ vibec source.vb --keep-asm
 
 ## Todo
 
-- Type inference for generic function calls (currently requires explicit type args)
 - Chained comparisons (python)
 - Pattern guards (rust)
 - Traits (rust)

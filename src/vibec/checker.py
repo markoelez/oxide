@@ -22,6 +22,7 @@ from .ast import (
   DictType,
   ExprStmt,
   Function,
+  MatchArm,
   ArrayType,
   DerefExpr,
   ImplBlock,
@@ -389,6 +390,8 @@ class TypeChecker:
     self.instantiated_methods: dict[str, "InstantiatedMethod"] = {}
     # Current type substitution (for checking generic function/method bodies)
     self.current_type_subst: dict[str, str] = {}
+    # Inferred generic calls: id(CallExpr) -> mangled_name (for AST transformation)
+    self.inferred_calls: dict[int, str] = {}
 
   def _resolve_generic_struct(self, name: str, type_args: tuple[TypeAnnotation, ...]) -> str:
     """Resolve a generic struct instantiation to its monomorphized name."""
@@ -1796,10 +1799,58 @@ class TypeChecker:
 
           return sig.return_type
 
-        # Check if it's a generic function without explicit type args
+        # Check if it's a generic function without explicit type args - try to infer
         if name in self.generic_functions:
           type_params = self.generic_functions[name]
-          raise TypeError(f"Generic function '{name}' requires explicit type arguments: {name}<{', '.join(type_params)}>(...)")
+          func_def = self.generic_function_defs[name]
+
+          # Check argument count
+          if len(args) != len(func_def.params):
+            raise TypeError(f"Generic function '{name}' expects {len(func_def.params)} arguments, got {len(args)}")
+
+          # kwargs not supported for generic functions (for now)
+          if kwargs:
+            raise TypeError(f"Generic function '{name}' does not support keyword arguments yet")
+
+          # Type check all arguments first to get their types
+          arg_types: list[str] = []
+          for arg in args:
+            arg_types.append(self._check_expr(arg))
+
+          # Try to infer type parameters from argument types
+          param_type_anns = [p.type_ann for p in func_def.params]
+          try:
+            inferred = self._infer_type_args(type_params, param_type_anns, arg_types)
+          except TypeError as e:
+            # Inference failed - give a helpful error
+            raise TypeError(f"Cannot infer type arguments for '{name}': {e}")
+
+          # Convert inferred dict to ordered list of type args
+          inferred_type_args = [inferred[tp] for tp in type_params]
+
+          # Instantiate the generic function with inferred types
+          sig = self._ensure_generic_function_instantiated(name, inferred_type_args)
+          mangled_name = f"{name}<{','.join(inferred_type_args)}>"
+
+          # Store the inferred call for AST transformation
+          self.inferred_calls[id(expr)] = mangled_name
+
+          # Verify argument types match (should always pass since we inferred from them)
+          for i, (arg_type, expected_type) in enumerate(zip(arg_types, sig.param_types)):
+            if arg_type != expected_type:
+              param_name = sig.param_names[i]
+              raise TypeError(f"Argument '{param_name}' of '{name}' expects {expected_type}, got {arg_type}")
+
+          # Mark variables as moved if passed by value
+          for arg, expected_type in zip(args, sig.param_types):
+            if not is_ref_type(expected_type):
+              match arg:
+                case VarExpr(var_name):
+                  self._maybe_move_var(var_name)
+                case _:
+                  pass
+
+          return sig.return_type
 
         if name not in self.functions:
           raise TypeError(f"Undefined function '{name}'")
@@ -2005,6 +2056,287 @@ class TypeChecker:
         return f"dict[{key_type},{value_type}]"
 
     raise TypeError(f"Unknown expression type: {type(expr)}")
+
+  # === AST Transformation for Type Inference ===
+
+  def transform_program(self, program: Program) -> Program:
+    """Walk AST and create new CallExpr nodes with resolved_name where needed."""
+    if not self.inferred_calls:
+      return program  # No transformation needed
+
+    # Transform functions
+    new_functions = tuple(self._transform_function(f) for f in program.functions)
+
+    # Transform impl blocks
+    new_impls = tuple(self._transform_impl(impl) for impl in program.impls)
+
+    return Program(
+      program.type_aliases,
+      program.structs,
+      program.enums,
+      new_impls,
+      new_functions,
+    )
+
+  def _transform_function(self, func: Function) -> Function:
+    """Transform a function, creating new CallExpr nodes where needed."""
+    new_body = tuple(self._transform_stmt(stmt) for stmt in func.body)
+    if new_body == func.body:
+      return func  # No changes
+    return Function(func.name, func.type_params, func.params, func.return_type, new_body)
+
+  def _transform_impl(self, impl: ImplBlock) -> ImplBlock:
+    """Transform an impl block, creating new method bodies where needed."""
+    new_methods = tuple(self._transform_function(m) for m in impl.methods)
+    if new_methods == impl.methods:
+      return impl  # No changes
+    return ImplBlock(impl.struct_name, impl.type_params, new_methods)
+
+  def _transform_stmt(self, stmt: Stmt) -> Stmt:
+    """Transform a statement, recursively transforming contained expressions."""
+    match stmt:
+      case LetStmt(name, type_ann, value, mutable):
+        new_value = self._transform_expr(value)
+        if new_value is value:
+          return stmt
+        return LetStmt(name, type_ann, new_value, mutable)
+
+      case AssignStmt(name, value):
+        new_value = self._transform_expr(value)
+        if new_value is value:
+          return stmt
+        return AssignStmt(name, new_value)
+
+      case IndexAssignStmt(target, index, value):
+        new_target = self._transform_expr(target)
+        new_index = self._transform_expr(index)
+        new_value = self._transform_expr(value)
+        if new_target is target and new_index is index and new_value is value:
+          return stmt
+        return IndexAssignStmt(new_target, new_index, new_value)
+
+      case FieldAssignStmt(target, field, value):
+        new_target = self._transform_expr(target)
+        new_value = self._transform_expr(value)
+        if new_target is target and new_value is value:
+          return stmt
+        return FieldAssignStmt(new_target, field, new_value)
+
+      case DerefAssignStmt(target, value):
+        new_target = self._transform_expr(target)
+        new_value = self._transform_expr(value)
+        if new_target is target and new_value is value:
+          return stmt
+        return DerefAssignStmt(new_target, new_value)
+
+      case ReturnStmt(value):
+        new_value = self._transform_expr(value)
+        if new_value is value:
+          return stmt
+        return ReturnStmt(new_value)
+
+      case ExprStmt(expr):
+        new_expr = self._transform_expr(expr)
+        if new_expr is expr:
+          return stmt
+        return ExprStmt(new_expr)
+
+      case IfStmt(condition, then_body, else_body):
+        new_condition = self._transform_expr(condition)
+        new_then = tuple(self._transform_stmt(s) for s in then_body)
+        new_else = tuple(self._transform_stmt(s) for s in else_body) if else_body else None
+        if new_condition is condition and new_then == then_body and new_else == else_body:
+          return stmt
+        return IfStmt(new_condition, new_then, new_else)
+
+      case WhileStmt(condition, body):
+        new_condition = self._transform_expr(condition)
+        new_body = tuple(self._transform_stmt(s) for s in body)
+        if new_condition is condition and new_body == body:
+          return stmt
+        return WhileStmt(new_condition, new_body)
+
+      case ForStmt(var, start, end, body):
+        new_start = self._transform_expr(start)
+        new_end = self._transform_expr(end)
+        new_body = tuple(self._transform_stmt(s) for s in body)
+        if new_start is start and new_end is end and new_body == body:
+          return stmt
+        return ForStmt(var, new_start, new_end, new_body)
+
+      case _:
+        return stmt
+
+  def _transform_expr(self, expr: Expr) -> Expr:
+    """Transform an expression, creating new CallExpr nodes where needed."""
+    match expr:
+      case CallExpr(name, args, kwargs, resolved_name):
+        # Check if this call needs the resolved_name filled in
+        expr_id = id(expr)
+        new_resolved = self.inferred_calls.get(expr_id, resolved_name)
+
+        # Transform arguments
+        new_args = tuple(self._transform_expr(a) for a in args)
+        new_kwargs = tuple((k, self._transform_expr(v)) for k, v in kwargs)
+
+        if new_args == args and new_kwargs == kwargs and new_resolved == resolved_name:
+          return expr
+        return CallExpr(name, new_args, new_kwargs, new_resolved)
+
+      case BinaryExpr(left, op, right):
+        new_left = self._transform_expr(left)
+        new_right = self._transform_expr(right)
+        if new_left is left and new_right is right:
+          return expr
+        return BinaryExpr(new_left, op, new_right)
+
+      case UnaryExpr(op, operand):
+        new_operand = self._transform_expr(operand)
+        if new_operand is operand:
+          return expr
+        return UnaryExpr(op, new_operand)
+
+      case ArrayLiteral(elements):
+        new_elements = tuple(self._transform_expr(e) for e in elements)
+        if new_elements == elements:
+          return expr
+        return ArrayLiteral(new_elements)
+
+      case IndexExpr(target, index):
+        new_target = self._transform_expr(target)
+        new_index = self._transform_expr(index)
+        if new_target is target and new_index is index:
+          return expr
+        return IndexExpr(new_target, new_index)
+
+      case SliceExpr(target, start, stop, step):
+        new_target = self._transform_expr(target)
+        new_start = self._transform_expr(start) if start else None
+        new_stop = self._transform_expr(stop) if stop else None
+        new_step = self._transform_expr(step) if step else None
+        if new_target is target and new_start is start and new_stop is stop and new_step is step:
+          return expr
+        return SliceExpr(new_target, new_start, new_stop, new_step)
+
+      case MethodCallExpr(target, method, args):
+        new_target = self._transform_expr(target)
+        new_args = tuple(self._transform_expr(a) for a in args)
+        if new_target is target and new_args == args:
+          return expr
+        return MethodCallExpr(new_target, method, new_args)
+
+      case StructLiteral(name, type_args, fields):
+        new_fields = tuple((k, self._transform_expr(v)) for k, v in fields)
+        if new_fields == fields:
+          return expr
+        return StructLiteral(name, type_args, new_fields)
+
+      case FieldAccessExpr(target, field):
+        new_target = self._transform_expr(target)
+        if new_target is target:
+          return expr
+        return FieldAccessExpr(new_target, field)
+
+      case TupleLiteral(elements):
+        new_elements = tuple(self._transform_expr(e) for e in elements)
+        if new_elements == elements:
+          return expr
+        return TupleLiteral(new_elements)
+
+      case TupleIndexExpr(target, index):
+        new_target = self._transform_expr(target)
+        if new_target is target:
+          return expr
+        return TupleIndexExpr(new_target, index)
+
+      case EnumLiteral(enum_name, type_args, variant_name, payload):
+        if payload is None:
+          return expr
+        new_payload = self._transform_expr(payload)
+        if new_payload is payload:
+          return expr
+        return EnumLiteral(enum_name, type_args, variant_name, new_payload)
+
+      case MatchExpr(target, arms):
+        new_target = self._transform_expr(target)
+        new_arms = tuple(
+          MatchArm(arm.enum_name, arm.variant_name, arm.binding, tuple(self._transform_stmt(s) for s in arm.body)) for arm in arms
+        )
+        if new_target is target and all(new_arm.body == old_arm.body for new_arm, old_arm in zip(new_arms, arms)):
+          return expr
+        return MatchExpr(new_target, new_arms)
+
+      case RefExpr(target, mutable):
+        new_target = self._transform_expr(target)
+        if new_target is target:
+          return expr
+        return RefExpr(new_target, mutable)
+
+      case DerefExpr(target):
+        new_target = self._transform_expr(target)
+        if new_target is target:
+          return expr
+        return DerefExpr(new_target)
+
+      case ClosureExpr(params, return_type, body):
+        new_body = self._transform_expr(body)
+        if new_body is body:
+          return expr
+        return ClosureExpr(params, return_type, new_body)
+
+      case ClosureCallExpr(target, args):
+        new_target = self._transform_expr(target)
+        new_args = tuple(self._transform_expr(a) for a in args)
+        if new_target is target and new_args == args:
+          return expr
+        return ClosureCallExpr(new_target, new_args)
+
+      case OkExpr(value):
+        new_value = self._transform_expr(value)
+        if new_value is value:
+          return expr
+        return OkExpr(new_value)
+
+      case ErrExpr(value):
+        new_value = self._transform_expr(value)
+        if new_value is value:
+          return expr
+        return ErrExpr(new_value)
+
+      case TryExpr(target):
+        new_target = self._transform_expr(target)
+        if new_target is target:
+          return expr
+        return TryExpr(new_target)
+
+      case DictLiteral(entries):
+        new_entries = tuple((self._transform_expr(k), self._transform_expr(v)) for k, v in entries)
+        if new_entries == entries:
+          return expr
+        return DictLiteral(new_entries)
+
+      case ListComprehension(element_expr, var_name, start, end, condition):
+        new_element = self._transform_expr(element_expr)
+        new_start = self._transform_expr(start)
+        new_end = self._transform_expr(end)
+        new_condition = self._transform_expr(condition) if condition else None
+        if new_element is element_expr and new_start is start and new_end is end and new_condition is condition:
+          return expr
+        return ListComprehension(new_element, var_name, new_start, new_end, new_condition)
+
+      case DictComprehension(key_expr, value_expr, var_name, start, end, condition):
+        new_key = self._transform_expr(key_expr)
+        new_value = self._transform_expr(value_expr)
+        new_start = self._transform_expr(start)
+        new_end = self._transform_expr(end)
+        new_condition = self._transform_expr(condition) if condition else None
+        if new_key is key_expr and new_value is value_expr and new_start is start and new_end is end and new_condition is condition:
+          return expr
+        return DictComprehension(new_key, new_value, var_name, new_start, new_end, new_condition)
+
+      case _:
+        # Literals and other leaf nodes don't need transformation
+        return expr
 
   def _check_method_call(self, target_type: str, method: str, args: tuple[Expr, ...]) -> str:
     """Type check a method call and return its return type."""
@@ -2293,10 +2625,19 @@ class TypeCheckResult:
   instantiated_methods: dict[str, InstantiatedMethod]
 
 
-def check(program: Program) -> TypeCheckResult:
-  """Convenience function to type check a program. Returns monomorphized type info."""
+def check(program: Program) -> tuple[Program, TypeCheckResult]:
+  """Type check a program and transform AST for inferred generic calls.
+
+  Returns:
+    tuple: (transformed_program, type_check_result)
+      - transformed_program: AST with resolved_name filled in for inferred generic calls
+      - type_check_result: Monomorphized type information for codegen
+  """
   checker = TypeChecker()
   checker.check(program)
+
+  # Transform AST to fill in resolved_name for inferred generic calls
+  transformed_program = checker.transform_program(program)
 
   # Extract instantiated generic types for codegen
   instantiated_structs: dict[str, list[tuple[str, str]]] = {}
@@ -2313,9 +2654,11 @@ def check(program: Program) -> TypeCheckResult:
         variants[var_name] = (i, payload_type is not None, payload_type)
       instantiated_enums[mangled_name] = variants
 
-  return TypeCheckResult(
+  type_check_result = TypeCheckResult(
     instantiated_structs,
     instantiated_enums,
     checker.instantiated_functions,
     checker.instantiated_methods,
   )
+
+  return transformed_program, type_check_result

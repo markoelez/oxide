@@ -30,6 +30,7 @@ examples/iterators
 examples/results
 examples/comprehensions
 examples/hashmaps
+examples/constants
 
 # uv lock file
 uv.lock

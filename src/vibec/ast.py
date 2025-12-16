@@ -328,11 +328,12 @@ Expr = (
 
 @dataclass(frozen=True, slots=True)
 class LetStmt:
-  """Variable declaration: let x: i64 = 42"""
+  """Variable declaration: let x: i64 = 42 or const x: i64 = 42"""
 
   name: str
   type_ann: TypeAnnotation
   value: Expr
+  mutable: bool = True  # True for let, False for const
 
 
 @dataclass(frozen=True, slots=True)

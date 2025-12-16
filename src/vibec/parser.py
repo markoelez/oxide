@@ -376,7 +376,9 @@ class Parser:
   def _parse_statement(self) -> Stmt:
     """Parse a single statement."""
     if self._check(TokenType.LET):
-      return self._parse_let()
+      return self._parse_let(mutable=True)
+    elif self._check(TokenType.CONST):
+      return self._parse_let(mutable=False)
     elif self._check(TokenType.RETURN):
       return self._parse_return()
     elif self._check(TokenType.IF):
@@ -437,16 +439,16 @@ class Parser:
     self._expect(TokenType.NEWLINE, "Expected newline after assignment")
     return AssignStmt(name_token.value, value)
 
-  def _parse_let(self) -> LetStmt:
-    """Parse: let name: type = expr"""
-    self._advance()  # consume 'let'
+  def _parse_let(self, mutable: bool = True) -> LetStmt:
+    """Parse: let name: type = expr OR const name: type = expr"""
+    self._advance()  # consume 'let' or 'const'
     name_token = self._expect(TokenType.IDENT, "Expected variable name")
     self._expect(TokenType.COLON, "Expected ':'")
     type_ann = self._parse_type()
     self._expect(TokenType.ASSIGN, "Expected '='")
     value = self._parse_expression()
-    self._expect(TokenType.NEWLINE, "Expected newline after let statement")
-    return LetStmt(name_token.value, type_ann, value)
+    self._expect(TokenType.NEWLINE, "Expected newline after let/const statement")
+    return LetStmt(name_token.value, type_ann, value, mutable)
 
   def _parse_return(self) -> ReturnStmt:
     """Parse: return expr"""

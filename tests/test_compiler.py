@@ -1584,6 +1584,64 @@ fn main() -> i64:
     ast = parse(tokens)
     check(ast)  # Should not raise
 
+  # === Const declaration tests ===
+
+  def test_const_reassign_error(self):
+    """Test that reassigning a const variable raises TypeError."""
+    source = """fn main() -> i64:
+    const x: i64 = 10
+    x = 20
+    return x
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot assign to const variable 'x'"):
+      check(ast)
+
+  def test_const_index_assign_error(self):
+    """Test that modifying const array via index raises TypeError."""
+    source = """fn main() -> i64:
+    const arr: [i64; 3] = [1, 2, 3]
+    arr[0] = 10
+    return arr[0]
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot assign to const variable 'arr'"):
+      check(ast)
+
+  def test_const_field_assign_error(self):
+    """Test that modifying const struct field raises TypeError."""
+    source = """struct Point:
+    x: i64
+    y: i64
+fn main() -> i64:
+    const p: Point = Point { x: 1, y: 2 }
+    p.x = 10
+    return p.x
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    from vibec.checker import TypeError
+
+    with pytest.raises(TypeError, match="Cannot assign to const variable 'p'"):
+      check(ast)
+
+  def test_const_valid_usage(self):
+    """Test that using const in expressions works."""
+    source = """fn main() -> i64:
+    const x: i64 = 10
+    const y: i64 = x + 5
+    return y
+"""
+    tokens = tokenize(source)
+    ast = parse(tokens)
+    check(ast)  # Should not raise
+
 
 @pytest.mark.skipif(
   subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip() != "arm64",
@@ -3184,3 +3242,56 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 30
+
+  # === Const declarations tests ===
+
+  def test_const_basic(self):
+    """Test basic const declaration."""
+    source = """fn main() -> i64:
+    const x: i64 = 42
+    x
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 42
+
+  def test_const_expression(self):
+    """Test const with expression value."""
+    source = """fn main() -> i64:
+    const a: i64 = 5
+    const b: i64 = a * 2
+    b
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 10
+
+  def test_const_bool(self):
+    """Test const with bool type."""
+    source = """fn main() -> i64:
+    const flag: bool = true
+    if flag:
+        1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1
+
+  def test_const_in_expression(self):
+    """Test using const in expressions."""
+    source = """fn main() -> i64:
+    const x: i64 = 10
+    const y: i64 = 20
+    x + y + 5
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 35
+
+  def test_let_mutable(self):
+    """Test that let variables can be reassigned."""
+    source = """fn main() -> i64:
+    let x: i64 = 10
+    x = 20
+    x
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 20

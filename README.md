@@ -64,6 +64,24 @@ fn main() -> i64:
     0  # Implicit return
 ```
 
+**Variables and Constants:**
+```
+fn main() -> i64:
+    # Mutable variable (can be reassigned)
+    let x: i64 = 10
+    x = 20  # OK
+    
+    # Constant (cannot be reassigned)
+    const PI_APPROX: i64 = 3
+    # PI_APPROX = 4  # Error: Cannot assign to const variable
+    
+    # Const with structs
+    const origin: Point = Point { x: 0, y: 0 }
+    # origin.x = 1  # Error: Cannot assign to const variable
+    
+    x + PI_APPROX
+```
+
 **Result Type and Error Propagation (like Rust):**
 ```
 # Function that can fail returns Result[OkType, ErrType]
@@ -143,7 +161,7 @@ fn main() -> i64:
     0
 ```
 
-**Supported:** hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
+**Supported:** `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture
@@ -204,7 +222,6 @@ vibec source.vb --keep-asm
 ## Todo
 
 - Type aliases
-- Const declarations
 - Python-style Chained comparison
 - Pattern guards
 - Generics

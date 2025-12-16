@@ -314,6 +314,7 @@ class VarState:
   type_str: str
   ownership: str  # "owned", "moved", "borrowed", "mut_borrowed"
   scope_depth: int  # Scope level where variable was defined
+  mutable: bool = True  # Can the variable be reassigned?
 
 
 @dataclass
@@ -369,10 +370,10 @@ class TypeChecker:
     self.scopes.pop()
     self.scope_depth -= 1
 
-  def _define_var(self, name: str, type_name: str) -> None:
+  def _define_var(self, name: str, type_name: str, mutable: bool = True) -> None:
     if name in self.scopes[-1]:
       raise TypeError(f"Variable '{name}' already defined in this scope")
-    self.scopes[-1][name] = VarState(type_name, "owned", self.scope_depth)
+    self.scopes[-1][name] = VarState(type_name, "owned", self.scope_depth, mutable)
 
   def _lookup_var(self, name: str) -> str:
     """Look up variable and return its type string."""
@@ -387,6 +388,12 @@ class TypeChecker:
       if name in scope:
         return scope[name]
     return None
+
+  def _check_mutable(self, name: str) -> None:
+    """Check that a variable is mutable (not const)."""
+    state = self._lookup_var_state(name)
+    if state is not None and not state.mutable:
+      raise TypeError(f"Cannot assign to const variable '{name}'")
 
   def _set_var_ownership(self, name: str, ownership: str) -> None:
     """Update the ownership state of a variable."""
@@ -669,7 +676,7 @@ class TypeChecker:
   def _check_stmt(self, stmt: Stmt) -> None:
     """Type check a statement."""
     match stmt:
-      case LetStmt(name, type_ann, value):
+      case LetStmt(name, type_ann, value, mutable):
         declared_type = self._check_type_ann(type_ann)
         value_type = self._check_expr(value)
         # Allow empty array literal to match any array type
@@ -701,9 +708,11 @@ class TypeChecker:
             self._maybe_move_var(src_name)
           case _:
             pass
-        self._define_var(name, declared_type)
+        self._define_var(name, declared_type, mutable)
 
       case AssignStmt(name, value):
+        # Check variable is mutable (not const)
+        self._check_mutable(name)
         # Check variable isn't borrowed before mutation
         self._check_not_borrowed(name)
         var_type = self._lookup_var(name)
@@ -712,6 +721,12 @@ class TypeChecker:
           raise TypeError(f"Cannot assign {value_type} to variable of type {var_type}")
 
       case IndexAssignStmt(target, index, value):
+        # Check mutability if target is a variable
+        match target:
+          case VarExpr(name):
+            self._check_mutable(name)
+          case _:
+            pass
         target_type = self._check_expr(target)
         index_type = self._check_expr(index)
 
@@ -806,6 +821,12 @@ class TypeChecker:
         self.loop_depth -= 1
 
       case FieldAssignStmt(target, field, value):
+        # Check mutability if target is a variable
+        match target:
+          case VarExpr(name):
+            self._check_mutable(name)
+          case _:
+            pass
         target_type = self._check_expr(target)
         if target_type not in self.structs:
           raise TypeError(f"Cannot access field of non-struct type {target_type}")

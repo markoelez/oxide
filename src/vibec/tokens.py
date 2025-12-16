@@ -8,6 +8,7 @@ class TokenType(Enum):
   # Keywords
   FN = auto()
   LET = auto()
+  CONST = auto()
   STRUCT = auto()
   IMPL = auto()
   ENUM = auto()
@@ -79,6 +80,7 @@ class TokenType(Enum):
 KEYWORDS: dict[str, TokenType] = {
   "fn": TokenType.FN,
   "let": TokenType.LET,
+  "const": TokenType.CONST,
   "struct": TokenType.STRUCT,
   "impl": TokenType.IMPL,
   "enum": TokenType.ENUM,

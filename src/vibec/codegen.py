@@ -16,6 +16,7 @@ from .ast import (
   VarExpr,
   VecType,
   CallExpr,
+  DictType,
   ExprStmt,
   Function,
   MatchArm,
@@ -35,6 +36,7 @@ from .ast import (
   SimpleType,
   BoolLiteral,
   ClosureExpr,
+  DictLiteral,
   EnumLiteral,
   ArrayLiteral,
   TupleLiteral,
@@ -65,6 +67,8 @@ def type_to_str(t: TypeAnnotation) -> str:
       return f"({','.join(type_to_str(e) for e in elems)})"
     case ResultType(ok_type, err_type):
       return f"Result[{type_to_str(ok_type)},{type_to_str(err_type)}]"
+    case DictType(key_type, value_type):
+      return f"dict[{type_to_str(key_type)},{type_to_str(value_type)}]"
     case RefType(inner, mutable):
       prefix = "&mut " if mutable else "&"
       return f"{prefix}{type_to_str(inner)}"
@@ -77,6 +81,11 @@ def type_to_str(t: TypeAnnotation) -> str:
 def is_ref_type(type_str: str) -> bool:
   """Check if type string represents a reference."""
   return type_str.startswith("&")
+
+
+def is_dict_type(type_str: str) -> bool:
+  """Check if type string represents a dict."""
+  return type_str.startswith("dict[")
 
 
 def get_array_size(type_str: str) -> int | None:
@@ -291,6 +300,10 @@ class CodeGenerator:
         self._collect_strings_from_expr(end)
         if condition is not None:
           self._collect_strings_from_expr(condition)
+      case DictLiteral(entries):
+        for key, value in entries:
+          self._collect_strings_from_expr(key)
+          self._collect_strings_from_expr(value)
       case _:
         pass
 
@@ -436,6 +449,8 @@ class CodeGenerator:
         return size  # Each element is 8 bytes
       case VecType(_):
         return 1  # List is a pointer
+      case DictType(_, _):
+        return 1  # Dict is a pointer
       case TupleType(elems):
         return len(elems)  # One slot per element
       case ResultType(_, _):
@@ -664,6 +679,19 @@ class CodeGenerator:
                 self._emit(f"    str x1, [x29, #{offset - 8}]")
             self.next_slot += 2
 
+          case DictType(_, _):
+            # Dict type: store pointer
+            match value:
+              case DictLiteral(entries):
+                # Create dict from literal
+                self._gen_dict_literal(entries)
+                self._emit(f"    str x0, [x29, #{offset}]")
+              case _:
+                # Empty dict or expression returning dict
+                self._gen_expr(value)
+                self._emit(f"    str x0, [x29, #{offset}]")
+            self.next_slot += 1
+
           case _:
             # Simple type: evaluate and store
             self._gen_expr(value)
@@ -682,17 +710,23 @@ class CodeGenerator:
         match target:
           case VarExpr(name):
             offset, type_str = self.locals[name]
-            # Evaluate index
+            # Evaluate index/key
             self._gen_expr(index)
-            self._emit("    str x0, [sp, #-16]!")  # Save index
+            self._emit("    str x0, [sp, #-16]!")  # Save index/key
 
             # Evaluate value
             self._gen_expr(value)
             self._emit("    mov x2, x0")  # Value in x2
 
-            self._emit("    ldr x1, [sp], #16")  # Restore index to x1
+            self._emit("    ldr x1, [sp], #16")  # Restore index/key to x1
 
-            if is_vec_type(type_str):
+            if is_dict_type(type_str):
+              # Dict: insert/update key-value pair (may grow and reallocate)
+              self._emit(f"    ldr x0, [x29, #{offset}]")  # Dict pointer
+              self._gen_dict_insert_inline()
+              # Update local variable with potentially new dict pointer
+              self._emit(f"    str x0, [x29, #{offset}]")
+            elif is_vec_type(type_str):
               # List: load base pointer, access data[index]
               self._emit(f"    ldr x0, [x29, #{offset}]")  # Base pointer
               self._emit("    add x0, x0, #16")  # Skip header
@@ -930,9 +964,13 @@ class CodeGenerator:
             offset, type_str = self.locals[name]
             # Evaluate index
             self._gen_expr(index)
-            self._emit("    mov x1, x0")  # Index in x1
+            self._emit("    mov x1, x0")  # Index/key in x1
 
-            if is_vec_type(type_str):
+            if is_dict_type(type_str):
+              # Dict lookup
+              self._emit(f"    ldr x0, [x29, #{offset}]")  # Dict pointer
+              self._gen_dict_lookup_inline()
+            elif is_vec_type(type_str):
               # List: load base pointer, access data[index]
               self._emit(f"    ldr x0, [x29, #{offset}]")  # Base pointer
               self._emit("    add x0, x0, #16")  # Skip header
@@ -1110,6 +1148,10 @@ class CodeGenerator:
         # This generates: let result = []; for var in range(start, end): if condition: result.push(expr)
         self._gen_list_comprehension(element_expr, var_name, start, end, condition)
 
+      case DictLiteral(entries):
+        # {key: value, ...}
+        self._gen_dict_literal(entries)
+
   def _gen_list_comprehension(self, element_expr: Expr, var_name: str, start: Expr, end: Expr, condition: Expr | None) -> None:
     """Generate code for list comprehension: [expr for var in range(start, end) if condition]."""
     # Allocate a temporary vec on stack
@@ -1235,6 +1277,370 @@ class CodeGenerator:
     else:
       del self.locals[var_name]
     self.next_slot = saved_next_slot
+
+  def _gen_dict_literal(self, entries: tuple[tuple[Expr, Expr], ...]) -> None:
+    """Generate code for dict literal: {key: value, ...}.
+
+    Dict structure:
+      - 8 bytes: capacity
+      - 8 bytes: length (number of entries)
+      - entries: [key (8), value (8), occupied (8)] * capacity
+    Entry size = 24 bytes
+    """
+    # Initial capacity (at least 16, or 2x entries) - use 16 minimum to reduce resizing
+    initial_capacity = max(16, len(entries) * 2)
+    # Total size: 16 (header) + capacity * 24 (entries)
+    total_size = 16 + initial_capacity * 24
+
+    # Allocate dict
+    self._emit(f"    mov x0, #{total_size}")
+    self._emit("    bl _malloc")
+    self._emit("    str x0, [sp, #-16]!")  # Save dict ptr
+
+    # Initialize header
+    self._emit(f"    mov x1, #{initial_capacity}")
+    self._emit("    str x1, [x0]")  # capacity
+    self._emit("    str xzr, [x0, #8]")  # length = 0
+
+    # Zero out all occupied flags
+    self._emit("    add x1, x0, #16")  # entries start
+    for i in range(initial_capacity):
+      self._emit(f"    str xzr, [x1, #{i * 24 + 16}]")  # occupied = 0
+
+    # Insert each entry
+    for key, value in entries:
+      # Save key and value on stack
+      self._gen_expr(key)
+      self._emit("    str x0, [sp, #-16]!")  # Save key
+      self._gen_expr(value)
+      self._emit("    str x0, [sp, #-16]!")  # Save value
+
+      # Load dict ptr, key, value
+      self._emit("    ldr x0, [sp, #32]")  # dict ptr
+      self._emit("    ldr x1, [sp, #16]")  # key
+      self._emit("    ldr x2, [sp]")  # value
+
+      # Call dict_insert (inline)
+      self._gen_dict_insert_inline()
+
+      # Clean up key/value from stack
+      self._emit("    add sp, sp, #32")
+
+    # Return dict pointer
+    self._emit("    ldr x0, [sp], #16")
+
+  def _gen_dict_insert_inline(self) -> None:
+    """Generate inline dict insert: x0=dict_ptr, x1=key, x2=value.
+
+    Uses simple linear probing with modulo hashing.
+    Grows dict if load factor > 70%.
+    """
+    # First check if we need to grow (length >= capacity * 0.7)
+    # Save registers
+    self._emit("    str x0, [sp, #-16]!")  # dict_ptr
+    self._emit("    str x1, [sp, #-16]!")  # key
+    self._emit("    str x2, [sp, #-16]!")  # value
+
+    grow_check_label = self._new_label("dict_grow_check")
+    no_grow_label = self._new_label("dict_no_grow")
+    grow_label = self._new_label("dict_grow")
+
+    self._emit(f"{grow_check_label}:")
+    self._emit("    ldr x0, [sp, #32]")  # dict_ptr
+    self._emit("    ldr x3, [x0]")  # capacity
+    self._emit("    ldr x4, [x0, #8]")  # length
+    # Check if length * 10 >= capacity * 7 (70% load)
+    self._emit("    mov x5, #10")
+    self._emit("    mul x5, x4, x5")  # length * 10
+    self._emit("    mov x6, #7")
+    self._emit("    mul x6, x3, x6")  # capacity * 7
+    self._emit("    cmp x5, x6")
+    self._emit(f"    b.lt {no_grow_label}")
+
+    # Need to grow - double capacity
+    self._emit(f"{grow_label}:")
+    self._emit("    ldr x0, [sp, #32]")  # old dict_ptr
+    self._emit("    ldr x3, [x0]")  # old capacity
+    self._emit("    lsl x7, x3, #1")  # new capacity = old * 2
+    # Allocate new dict: 16 + new_capacity * 24
+    self._emit("    mov x8, #24")
+    self._emit("    mul x8, x7, x8")
+    self._emit("    add x0, x8, #16")
+    self._emit("    bl _malloc")  # new dict in x0
+    self._emit("    str x0, [sp, #-16]!")  # save new dict ptr
+
+    # Initialize new dict header
+    self._emit("    ldr x7, [sp, #48]")  # old dict
+    self._emit("    ldr x3, [x7]")  # old capacity
+    self._emit("    lsl x3, x3, #1")  # new capacity
+    self._emit("    str x3, [x0]")  # store new capacity
+    self._emit("    str xzr, [x0, #8]")  # length = 0
+
+    # Zero out occupied flags in new dict
+    zero_loop = self._new_label("dict_zero")
+    zero_done = self._new_label("dict_zero_done")
+    self._emit("    mov x4, #0")  # counter
+    self._emit(f"{zero_loop}:")
+    self._emit("    cmp x4, x3")
+    self._emit(f"    b.ge {zero_done}")
+    self._emit("    mov x5, #24")
+    self._emit("    mul x5, x4, x5")
+    self._emit("    add x5, x0, x5")
+    self._emit("    add x5, x5, #16")
+    self._emit("    str xzr, [x5, #16]")  # occupied = 0
+    self._emit("    add x4, x4, #1")
+    self._emit(f"    b {zero_loop}")
+    self._emit(f"{zero_done}:")
+
+    # Rehash all entries from old dict to new dict
+    rehash_loop = self._new_label("dict_rehash")
+    rehash_next = self._new_label("dict_rehash_next")
+    rehash_done = self._new_label("dict_rehash_done")
+    self._emit("    ldr x7, [sp, #48]")  # old dict
+    self._emit("    ldr x8, [x7]")  # old capacity
+    self._emit("    mov x9, #0")  # counter
+
+    self._emit(f"{rehash_loop}:")
+    self._emit("    cmp x9, x8")
+    self._emit(f"    b.ge {rehash_done}")
+
+    # Check if old entry is occupied
+    self._emit("    mov x10, #24")
+    self._emit("    mul x10, x9, x10")
+    self._emit("    add x10, x7, x10")
+    self._emit("    add x10, x10, #16")  # old entry addr
+    self._emit("    ldr x11, [x10, #16]")  # occupied?
+    self._emit(f"    cbz x11, {rehash_next}")
+
+    # Copy to new dict using inline insert
+    self._emit("    ldr x1, [x10]")  # key
+    self._emit("    ldr x2, [x10, #8]")  # value
+    self._emit("    ldr x0, [sp]")  # new dict
+    # Inline simple insert (no growth check needed during rehash)
+    self._gen_dict_simple_insert()
+
+    self._emit(f"{rehash_next}:")
+    self._emit("    add x9, x9, #1")
+    self._emit(f"    b {rehash_loop}")
+    self._emit(f"{rehash_done}:")
+
+    # Free old dict
+    self._emit("    ldr x0, [sp, #48]")  # old dict
+    self._emit("    bl _free")
+
+    # Update stack with new dict ptr
+    self._emit("    ldr x0, [sp], #16")  # pop new dict
+    self._emit("    str x0, [sp, #32]")  # update dict_ptr on stack
+
+    self._emit(f"{no_grow_label}:")
+    # Restore registers and do the actual insert
+    self._emit("    ldr x2, [sp], #16")  # value
+    self._emit("    ldr x1, [sp], #16")  # key
+    self._emit("    ldr x0, [sp], #16")  # dict_ptr
+    self._gen_dict_simple_insert()
+
+  def _gen_dict_simple_insert(self) -> None:
+    """Simple dict insert without growth check: x0=dict_ptr, x1=key, x2=value."""
+    # Load capacity
+    self._emit("    ldr x3, [x0]")  # capacity
+    # Hash: key % capacity (handle negative by using unsigned)
+    self._emit("    udiv x4, x1, x3")
+    self._emit("    msub x4, x4, x3, x1")  # x4 = key % capacity
+
+    # Linear probe loop
+    probe_loop = self._new_label("dict_probe")
+    probe_found = self._new_label("dict_found")
+    probe_empty = self._new_label("dict_empty")
+
+    self._emit(f"{probe_loop}:")
+    # Calculate entry address: dict_ptr + 16 + index * 24
+    self._emit("    mov x5, #24")
+    self._emit("    mul x5, x4, x5")
+    self._emit("    add x5, x0, x5")
+    self._emit("    add x5, x5, #16")  # x5 = entry address
+
+    # Check if occupied
+    self._emit("    ldr x6, [x5, #16]")  # occupied flag
+    self._emit(f"    cbz x6, {probe_empty}")  # If not occupied, insert here
+
+    # Check if key matches
+    self._emit("    ldr x6, [x5]")  # stored key
+    self._emit("    cmp x6, x1")
+    self._emit(f"    b.eq {probe_found}")
+
+    # Linear probe: next slot
+    self._emit("    add x4, x4, #1")
+    self._emit("    udiv x6, x4, x3")
+    self._emit("    msub x4, x6, x3, x4")  # x4 = (x4 + 1) % capacity
+    self._emit(f"    b {probe_loop}")
+
+    # Empty slot found - insert new entry
+    self._emit(f"{probe_empty}:")
+    self._emit("    str x1, [x5]")  # key
+    self._emit("    str x2, [x5, #8]")  # value
+    self._emit("    mov x6, #1")
+    self._emit("    str x6, [x5, #16]")  # occupied = 1
+    # Increment length
+    self._emit("    ldr x6, [x0, #8]")
+    self._emit("    add x6, x6, #1")
+    self._emit("    str x6, [x0, #8]")
+    done_label = self._new_label("dict_insert_done")
+    self._emit(f"    b {done_label}")
+
+    # Existing key found - update value
+    self._emit(f"{probe_found}:")
+    self._emit("    str x2, [x5, #8]")  # update value
+
+    self._emit(f"{done_label}:")
+
+  def _gen_dict_lookup_inline(self) -> None:
+    """Generate inline dict lookup: x0=dict_ptr, x1=key. Result in x0."""
+    # x0 = dict_ptr, x1 = key
+    # Load capacity
+    self._emit("    ldr x3, [x0]")  # capacity
+    # Hash: key % capacity
+    self._emit("    udiv x4, x1, x3")
+    self._emit("    msub x4, x4, x3, x1")  # x4 = key % capacity
+
+    # Linear probe loop
+    probe_loop = self._new_label("dict_get_probe")
+    probe_found = self._new_label("dict_get_found")
+    probe_not_found = self._new_label("dict_get_not_found")
+
+    self._emit(f"{probe_loop}:")
+    # Calculate entry address: dict_ptr + 16 + index * 24
+    self._emit("    mov x5, #24")
+    self._emit("    mul x5, x4, x5")
+    self._emit("    add x5, x0, x5")
+    self._emit("    add x5, x5, #16")  # x5 = entry address
+
+    # Check if occupied
+    self._emit("    ldr x6, [x5, #16]")  # occupied flag
+    self._emit(f"    cbz x6, {probe_not_found}")  # If not occupied, key not found
+
+    # Check if key matches
+    self._emit("    ldr x6, [x5]")  # stored key
+    self._emit("    cmp x6, x1")
+    self._emit(f"    b.eq {probe_found}")
+
+    # Linear probe: next slot
+    self._emit("    add x4, x4, #1")
+    self._emit("    udiv x6, x4, x3")
+    self._emit("    msub x4, x6, x3, x4")  # x4 = (x4 + 1) % capacity
+    self._emit(f"    b {probe_loop}")
+
+    # Key found - return value
+    self._emit(f"{probe_found}:")
+    self._emit("    ldr x0, [x5, #8]")  # value
+    done_label = self._new_label("dict_get_done")
+    self._emit(f"    b {done_label}")
+
+    # Key not found - return 0 (or could panic)
+    self._emit(f"{probe_not_found}:")
+    self._emit("    mov x0, #0")
+
+    self._emit(f"{done_label}:")
+
+  def _gen_dict_contains_inline(self) -> None:
+    """Generate inline dict contains check: x0=dict_ptr, x1=key. Result (0 or 1) in x0."""
+    # x0 = dict_ptr, x1 = key
+    # Load capacity
+    self._emit("    ldr x3, [x0]")  # capacity
+    # Hash: key % capacity
+    self._emit("    udiv x4, x1, x3")
+    self._emit("    msub x4, x4, x3, x1")  # x4 = key % capacity
+
+    # Linear probe loop
+    probe_loop = self._new_label("dict_contains_probe")
+    probe_found = self._new_label("dict_contains_found")
+    probe_not_found = self._new_label("dict_contains_not_found")
+
+    self._emit(f"{probe_loop}:")
+    # Calculate entry address: dict_ptr + 16 + index * 24
+    self._emit("    mov x5, #24")
+    self._emit("    mul x5, x4, x5")
+    self._emit("    add x5, x0, x5")
+    self._emit("    add x5, x5, #16")  # x5 = entry address
+
+    # Check if occupied
+    self._emit("    ldr x6, [x5, #16]")  # occupied flag
+    self._emit(f"    cbz x6, {probe_not_found}")  # If not occupied, key not found
+
+    # Check if key matches
+    self._emit("    ldr x6, [x5]")  # stored key
+    self._emit("    cmp x6, x1")
+    self._emit(f"    b.eq {probe_found}")
+
+    # Linear probe: next slot
+    self._emit("    add x4, x4, #1")
+    self._emit("    udiv x6, x4, x3")
+    self._emit("    msub x4, x6, x3, x4")  # x4 = (x4 + 1) % capacity
+    self._emit(f"    b {probe_loop}")
+
+    # Key found
+    self._emit(f"{probe_found}:")
+    self._emit("    mov x0, #1")
+    done_label = self._new_label("dict_contains_done")
+    self._emit(f"    b {done_label}")
+
+    # Key not found
+    self._emit(f"{probe_not_found}:")
+    self._emit("    mov x0, #0")
+
+    self._emit(f"{done_label}:")
+
+  def _gen_dict_remove_inline(self) -> None:
+    """Generate inline dict remove: x0=dict_ptr, x1=key. Result (0 or 1) in x0."""
+    # x0 = dict_ptr, x1 = key
+    # Load capacity
+    self._emit("    ldr x3, [x0]")  # capacity
+    # Hash: key % capacity
+    self._emit("    udiv x4, x1, x3")
+    self._emit("    msub x4, x4, x3, x1")  # x4 = key % capacity
+
+    # Linear probe loop
+    probe_loop = self._new_label("dict_remove_probe")
+    probe_found = self._new_label("dict_remove_found")
+    probe_not_found = self._new_label("dict_remove_not_found")
+
+    self._emit(f"{probe_loop}:")
+    # Calculate entry address: dict_ptr + 16 + index * 24
+    self._emit("    mov x5, #24")
+    self._emit("    mul x5, x4, x5")
+    self._emit("    add x5, x0, x5")
+    self._emit("    add x5, x5, #16")  # x5 = entry address
+
+    # Check if occupied
+    self._emit("    ldr x6, [x5, #16]")  # occupied flag
+    self._emit(f"    cbz x6, {probe_not_found}")  # If not occupied, key not found
+
+    # Check if key matches
+    self._emit("    ldr x6, [x5]")  # stored key
+    self._emit("    cmp x6, x1")
+    self._emit(f"    b.eq {probe_found}")
+
+    # Linear probe: next slot
+    self._emit("    add x4, x4, #1")
+    self._emit("    udiv x6, x4, x3")
+    self._emit("    msub x4, x6, x3, x4")  # x4 = (x4 + 1) % capacity
+    self._emit(f"    b {probe_loop}")
+
+    # Key found - remove it
+    self._emit(f"{probe_found}:")
+    self._emit("    str xzr, [x5, #16]")  # Mark as unoccupied
+    # Decrement length
+    self._emit("    ldr x6, [x0, #8]")
+    self._emit("    sub x6, x6, #1")
+    self._emit("    str x6, [x0, #8]")
+    self._emit("    mov x0, #1")  # Return true
+    done_label = self._new_label("dict_remove_done")
+    self._emit(f"    b {done_label}")
+
+    # Key not found
+    self._emit(f"{probe_not_found}:")
+    self._emit("    mov x0, #0")  # Return false
+
+    self._emit(f"{done_label}:")
 
   def _gen_print(self, args: tuple[Expr, ...]) -> None:
     """Generate code for print() builtin.
@@ -1526,6 +1932,45 @@ class CodeGenerator:
         case "fold":
           # fold(init, closure): reduce vec to single value
           self._gen_vec_fold(offset, args[0], args[1])
+
+    elif is_dict_type(type_str):
+      match method:
+        case "len":
+          # len(): return dict.len
+          self._emit(f"    ldr x9, [x29, #{offset}]")  # Dict base
+          self._emit("    ldr x0, [x9, #8]")  # Length
+
+        case "contains":
+          # contains(key): return true if key exists
+          self._gen_expr(args[0])  # Key in x0
+          self._emit("    mov x1, x0")  # Key in x1
+          self._emit(f"    ldr x0, [x29, #{offset}]")  # Dict pointer
+          self._gen_dict_contains_inline()
+
+        case "get":
+          # get(key): return value for key (or 0 if not found)
+          self._gen_expr(args[0])  # Key in x0
+          self._emit("    mov x1, x0")  # Key in x1
+          self._emit(f"    ldr x0, [x29, #{offset}]")  # Dict pointer
+          self._gen_dict_lookup_inline()
+
+        case "insert":
+          # insert(key, value): insert key-value pair
+          self._gen_expr(args[0])  # Key
+          self._emit("    str x0, [sp, #-16]!")  # Save key
+          self._gen_expr(args[1])  # Value
+          self._emit("    mov x2, x0")  # Value in x2
+          self._emit("    ldr x1, [sp], #16")  # Key in x1
+          self._emit(f"    ldr x0, [x29, #{offset}]")  # Dict pointer
+          self._gen_dict_insert_inline()
+          self._emit("    mov x0, #0")  # Return 0
+
+        case "remove":
+          # remove(key): remove key and return whether it existed
+          self._gen_expr(args[0])  # Key in x0
+          self._emit("    mov x1, x0")  # Key in x1
+          self._emit(f"    ldr x0, [x29, #{offset}]")  # Dict pointer
+          self._gen_dict_remove_inline()
 
     elif type_str in self.struct_methods and method in self.struct_methods[type_str]:
       # Struct method call

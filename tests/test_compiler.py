@@ -2985,3 +2985,146 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 25  # (0+1) + (2+1) + (4+1) + (6+1) + (8+1) = 25
+
+  # === Dict/HashMap tests ===
+
+  def test_dict_empty(self):
+    """Test empty dict creation."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {}
+    d.len()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 0
+
+  def test_dict_literal(self):
+    """Test dict literal creation."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20, 3: 30}
+    d.len()
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 3
+
+  def test_dict_get(self):
+    """Test dict get operation."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20, 3: 30}
+    d[2]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 20
+
+  def test_dict_get_multiple(self):
+    """Test getting multiple values from dict."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20, 3: 30}
+    d[1] + d[2] + d[3]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 60
+
+  def test_dict_set(self):
+    """Test dict set operation."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {}
+    d[5] = 50
+    d[5]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 50
+
+  def test_dict_update(self):
+    """Test updating existing key in dict."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10}
+    d[1] = 100
+    d[1]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 100
+
+  def test_dict_contains_true(self):
+    """Test dict contains returns true for existing key."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20}
+    if d.contains(1):
+        return 1
+    return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1
+
+  def test_dict_contains_false(self):
+    """Test dict contains returns false for missing key."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20}
+    if d.contains(99):
+        return 1
+    return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 0
+
+  def test_dict_insert(self):
+    """Test dict insert method."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {}
+    d.insert(7, 70)
+    d.insert(8, 80)
+    d[7] + d[8]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 150
+
+  def test_dict_remove(self):
+    """Test dict remove method."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20}
+    let removed: bool = d.remove(1)
+    if removed:
+        return d.len()
+    return 99
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1
+
+  def test_dict_remove_nonexistent(self):
+    """Test dict remove returns false for nonexistent key."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10}
+    let removed: bool = d.remove(99)
+    if removed:
+        return 1
+    return 0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 0
+
+  def test_dict_get_method(self):
+    """Test dict get method."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {1: 10, 2: 20}
+    d.get(1) + d.get(2)
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 30
+
+  def test_dict_many_entries(self):
+    """Test dict with many entries to test hash collision handling."""
+    source = """fn main() -> i64:
+    let d: dict[i64, i64] = {}
+    d[0] = 0
+    d[1] = 1
+    d[2] = 2
+    d[3] = 3
+    d[4] = 4
+    d[5] = 5
+    d[6] = 6
+    d[7] = 7
+    d[8] = 8
+    d[9] = 9
+    d[0] + d[1] + d[2] + d[3] + d[4] + d[5] + d[6] + d[7] + d[8] + d[9]
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 45  # 0 + 1 + ... + 9 = 45

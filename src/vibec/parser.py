@@ -17,6 +17,7 @@ from .ast import (
   VarExpr,
   VecType,
   CallExpr,
+  DictType,
   ExprStmt,
   Function,
   MatchArm,
@@ -38,6 +39,7 @@ from .ast import (
   SimpleType,
   BoolLiteral,
   ClosureExpr,
+  DictLiteral,
   EnumLiteral,
   EnumVariant,
   StructField,
@@ -344,6 +346,15 @@ class Parser:
       err_type = self._parse_type()
       self._expect(TokenType.RBRACKET, "Expected ']' in Result type")
       return ResultType(ok_type, err_type)
+
+    # Check for dict[K, V]
+    if token.value == "dict" and self._check(TokenType.LBRACKET):
+      self._advance()
+      key_type = self._parse_type()
+      self._expect(TokenType.COMMA, "Expected ',' in dict type")
+      value_type = self._parse_type()
+      self._expect(TokenType.RBRACKET, "Expected ']' in dict type")
+      return DictType(key_type, value_type)
 
     return SimpleType(token.value)
 
@@ -658,8 +669,36 @@ class Parser:
         self._expect(TokenType.RPAREN, "Expected ')'")
         return self._parse_postfix(first)
 
+    elif token.type == TokenType.LBRACE:
+      # Dict literal: {key: value, ...}
+      return self._parse_dict_literal()
+
     else:
       raise ParseError(f"Unexpected token '{token.value}'", token)
+
+  def _parse_dict_literal(self) -> DictLiteral:
+    """Parse dict literal: {key: value, ...}."""
+    self._expect(TokenType.LBRACE, "Expected '{'")
+    entries: list[tuple[Expr, Expr]] = []
+
+    if not self._check(TokenType.RBRACE):
+      # Parse first entry
+      key = self._parse_expression()
+      self._expect(TokenType.COLON, "Expected ':' in dict literal")
+      value = self._parse_expression()
+      entries.append((key, value))
+
+      while self._check(TokenType.COMMA):
+        self._advance()
+        if self._check(TokenType.RBRACE):
+          break  # Allow trailing comma
+        key = self._parse_expression()
+        self._expect(TokenType.COLON, "Expected ':' in dict literal")
+        value = self._parse_expression()
+        entries.append((key, value))
+
+    self._expect(TokenType.RBRACE, "Expected '}'")
+    return DictLiteral(tuple(entries))
 
   def _parse_postfix(self, expr: Expr) -> Expr:
     """Parse postfix operations: indexing [i], field access .field, tuple index .0, method calls .method(), try ?."""

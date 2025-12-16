@@ -88,6 +88,25 @@ fn main() -> i64:
     0
 ```
 
+**Python/Rust-style Hashmaps (dict):**
+```
+fn main() -> i64:
+    # Create and use dict
+    let scores: dict[i64, i64] = {}
+    scores[1] = 100
+    scores[2] = 85
+    print(scores[1])  # 100
+    print(scores.len())  # 2
+    
+    # Dict literals and methods
+    let prices: dict[i64, i64] = {100: 50, 200: 75}
+    if prices.contains(100):
+        print(prices.get(100))  # 50
+    prices.insert(300, 100)
+    prices.remove(100)
+    0
+```
+
 **Python-style List Comprehensions:**
 ```
 fn main() -> i64:
@@ -120,7 +139,7 @@ fn main() -> i64:
     0
 ```
 
-**Supported:** list comprehensions, `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
+**Supported:** hashmaps (`dict[K,V]`), list comprehensions, `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture
@@ -177,6 +196,16 @@ vibec source.vb --keep-asm
 - Python 3.12+
 - macOS with ARM64 (Apple Silicon)
 - Xcode Command Line Tools (for `as` and `ld`)
+
+## Todo
+
+- Type aliases
+- Const declarations
+- Python-style Chained comparison
+- Pattern guards
+- Generics
+- Rust-style traits
+- Python-style slice syntax 
 
 ## License
 

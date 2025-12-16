@@ -58,8 +58,16 @@ class ResultType:
   err_type: "TypeAnnotation"
 
 
+@dataclass(frozen=True, slots=True)
+class DictType:
+  """Dictionary/hashmap type: dict[K, V]."""
+
+  key_type: "TypeAnnotation"
+  value_type: "TypeAnnotation"
+
+
 # Type annotation union
-TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType | FnType | ResultType
+TypeAnnotation = SimpleType | ArrayType | VecType | TupleType | RefType | FnType | ResultType | DictType
 
 
 # === Expressions ===
@@ -255,6 +263,13 @@ class TryExpr:
 
 
 @dataclass(frozen=True, slots=True)
+class DictLiteral:
+  """Dictionary literal: {key: value, ...}."""
+
+  entries: tuple[tuple["Expr", "Expr"], ...]  # (key, value) pairs
+
+
+@dataclass(frozen=True, slots=True)
 class ListComprehension:
   """List comprehension: [expr for var in iterable] or [expr for var in iterable if cond]."""
 
@@ -289,6 +304,7 @@ Expr = (
   | ClosureCallExpr
   | OkExpr
   | ErrExpr
+  | DictLiteral
   | TryExpr
   | ListComprehension
 )

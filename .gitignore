@@ -29,6 +29,7 @@ examples/kwargs
 examples/iterators
 examples/results
 examples/comprehensions
+examples/hashmaps
 
 # uv lock file
 uv.lock

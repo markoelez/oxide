@@ -18,6 +18,7 @@ from .ast import (
   VarExpr,
   VecType,
   CallExpr,
+  DictType,
   ExprStmt,
   Function,
   ArrayType,
@@ -35,6 +36,7 @@ from .ast import (
   SimpleType,
   BoolLiteral,
   ClosureExpr,
+  DictLiteral,
   EnumLiteral,
   ArrayLiteral,
   TupleLiteral,
@@ -106,6 +108,45 @@ def is_array_type(type_str: str) -> bool:
 def is_vec_type(type_str: str) -> bool:
   """Check if type string represents a vec."""
   return type_str.startswith("vec[")
+
+
+def is_dict_type(type_str: str) -> bool:
+  """Check if type string represents a dict."""
+  return type_str.startswith("dict[")
+
+
+def get_dict_key_type(type_str: str) -> str | None:
+  """Extract key type from dict type string like dict[i64,str] -> i64."""
+  if not is_dict_type(type_str):
+    return None
+  inner = type_str[5:-1]  # Remove "dict[" and "]"
+  # Find the comma that separates key and value types (handle nested types)
+  depth = 0
+  for i, c in enumerate(inner):
+    if c in "([":
+      depth += 1
+    elif c in ")]":
+      depth -= 1
+    elif c == "," and depth == 0:
+      return inner[:i]
+  return None
+
+
+def get_dict_value_type(type_str: str) -> str | None:
+  """Extract value type from dict type string like dict[i64,str] -> str."""
+  if not is_dict_type(type_str):
+    return None
+  inner = type_str[5:-1]  # Remove "dict[" and "]"
+  # Find the comma that separates key and value types (handle nested types)
+  depth = 0
+  for i, c in enumerate(inner):
+    if c in "([":
+      depth += 1
+    elif c in ")]":
+      depth -= 1
+    elif c == "," and depth == 0:
+      return inner[i + 1 :]
+  return None
 
 
 def is_tuple_type(type_str: str) -> bool:
@@ -498,6 +539,13 @@ class TypeChecker:
         ok_str = self._check_type_ann(ok_type)
         err_str = self._check_type_ann(err_type)
         return f"Result[{ok_str},{err_str}]"
+      case DictType(key_type, value_type):
+        key_str = self._check_type_ann(key_type)
+        value_str = self._check_type_ann(value_type)
+        # Only allow i64 and str as key types
+        if key_str not in ("i64", "str"):
+          raise TypeError(f"Dict keys must be i64 or str, got {key_str}")
+        return f"dict[{key_str},{value_str}]"
     raise TypeError(f"Unknown type annotation: {t}")
 
   def check(self, program: Program) -> None:
@@ -628,6 +676,9 @@ class TypeChecker:
           pass  # OK: empty array assigned to array type
         elif value_type == "[]" and is_vec_type(declared_type):
           pass  # OK: empty array assigned to vec type
+        # Allow empty dict literal to match any dict type
+        elif value_type == "dict[?,?]" and is_dict_type(declared_type):
+          pass  # OK: empty dict assigned to dict type
         # Handle Result type unification for Ok/Err
         elif is_result_type(declared_type) and value_type.startswith("Result["):
           # Unify partial Result types (Ok or Err with ?)
@@ -662,6 +713,21 @@ class TypeChecker:
       case IndexAssignStmt(target, index, value):
         target_type = self._check_expr(target)
         index_type = self._check_expr(index)
+
+        # Handle dict assignment: d[key] = value
+        if is_dict_type(target_type):
+          key_type = get_dict_key_type(target_type)
+          val_type = get_dict_value_type(target_type)
+          if key_type is None or val_type is None:
+            raise TypeError(f"Invalid dict type: {target_type}")
+          if index_type != key_type:
+            raise TypeError(f"Dict key must be {key_type}, got {index_type}")
+          value_type = self._check_expr(value)
+          if value_type != val_type:
+            raise TypeError(f"Dict value must be {val_type}, got {value_type}")
+          return
+
+        # Handle array/vec assignment
         if index_type != "i64":
           raise TypeError(f"Index must be i64, got {index_type}")
 
@@ -791,6 +857,18 @@ class TypeChecker:
       case IndexExpr(target, index):
         target_type = self._check_expr(target)
         index_type = self._check_expr(index)
+
+        # Handle dict indexing
+        if is_dict_type(target_type):
+          key_type = get_dict_key_type(target_type)
+          value_type = get_dict_value_type(target_type)
+          if key_type is None or value_type is None:
+            raise TypeError(f"Invalid dict type: {target_type}")
+          if index_type != key_type:
+            raise TypeError(f"Dict key must be {key_type}, got {index_type}")
+          return value_type
+
+        # Handle array/vec indexing
         if index_type != "i64":
           raise TypeError(f"Index must be i64, got {index_type}")
         elem_type = get_element_type(target_type)
@@ -1171,6 +1249,30 @@ class TypeChecker:
         self._exit_scope()
         return f"vec[{elem_type}]"
 
+      case DictLiteral(entries):
+        # {key: value, ...}
+        if not entries:
+          # Empty dict - type will be inferred from context
+          return "dict[?,?]"
+
+        # Check all entries have consistent types
+        first_key_type = self._check_expr(entries[0][0])
+        first_value_type = self._check_expr(entries[0][1])
+
+        # Validate key type is hashable (i64 or str)
+        if first_key_type not in ("i64", "str"):
+          raise TypeError(f"Dict keys must be i64 or str, got {first_key_type}")
+
+        for key, value in entries[1:]:
+          key_type = self._check_expr(key)
+          value_type = self._check_expr(value)
+          if key_type != first_key_type:
+            raise TypeError(f"Dict key type mismatch: expected {first_key_type}, got {key_type}")
+          if value_type != first_value_type:
+            raise TypeError(f"Dict value type mismatch: expected {first_value_type}, got {value_type}")
+
+        return f"dict[{first_key_type},{first_value_type}]"
+
     raise TypeError(f"Unknown expression type: {type(expr)}")
 
   def _check_method_call(self, target_type: str, method: str, args: tuple[Expr, ...]) -> str:
@@ -1301,6 +1403,54 @@ class TypeChecker:
         return "i64"
       else:
         raise TypeError(f"Unknown array method '{method}'")
+
+    elif is_dict_type(target_type):
+      key_type = get_dict_key_type(target_type)
+      value_type = get_dict_value_type(target_type)
+      assert key_type is not None and value_type is not None
+
+      if method == "len":
+        if len(args) != 0:
+          raise TypeError(f"len() expects 0 arguments, got {len(args)}")
+        return "i64"
+
+      elif method == "contains":
+        if len(args) != 1:
+          raise TypeError(f"contains() expects 1 argument, got {len(args)}")
+        arg_type = self._check_expr(args[0])
+        if arg_type != key_type:
+          raise TypeError(f"contains() expects key of type {key_type}, got {arg_type}")
+        return "bool"
+
+      elif method == "get":
+        if len(args) != 1:
+          raise TypeError(f"get() expects 1 argument, got {len(args)}")
+        arg_type = self._check_expr(args[0])
+        if arg_type != key_type:
+          raise TypeError(f"get() expects key of type {key_type}, got {arg_type}")
+        return value_type
+
+      elif method == "insert":
+        if len(args) != 2:
+          raise TypeError(f"insert() expects 2 arguments, got {len(args)}")
+        k_type = self._check_expr(args[0])
+        v_type = self._check_expr(args[1])
+        if k_type != key_type:
+          raise TypeError(f"insert() key must be {key_type}, got {k_type}")
+        if v_type != value_type:
+          raise TypeError(f"insert() value must be {value_type}, got {v_type}")
+        return "i64"  # Returns nothing useful
+
+      elif method == "remove":
+        if len(args) != 1:
+          raise TypeError(f"remove() expects 1 argument, got {len(args)}")
+        arg_type = self._check_expr(args[0])
+        if arg_type != key_type:
+          raise TypeError(f"remove() expects key of type {key_type}, got {arg_type}")
+        return "bool"  # Returns whether key existed
+
+      else:
+        raise TypeError(f"Unknown dict method '{method}'")
 
     elif target_type in self.struct_methods:
       # Struct method call

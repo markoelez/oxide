@@ -403,6 +403,16 @@ vibec source.vb --keep-asm
 ## Todo
 
 - Traits (rust)
+- Operator Overloading (Rust/C++) 
+- ? for Option Types (Rust)
+- Default Parameter Values (Python)
+- String Interpolation / F-strings (Python)
+- Or-Patterns in Match (Rust)
+- if let / while let (Rust)
+- Tuple Unpacking / Destructuring (Python/Rust)
+- Struct Update Syntax (Rust)
+- Wildcard Patterns (Rust)
+- Async/Await (Rust/Python)
 
 ## License
 

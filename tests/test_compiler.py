@@ -4263,3 +4263,251 @@ fn main() -> i64:
 """
     exit_code, _ = self._compile_and_run(source)
     assert exit_code == 1  # 42 > 40 is true
+
+  # === Operator Overloading Tests ===
+
+  def test_operator_overload_add(self):
+    """Test overloading the + operator for a struct."""
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn __add__(self: Point, other: Point) -> Point:
+        Point { x: self.x + other.x, y: self.y + other.y }
+
+fn main() -> i64:
+    let p1: Point = Point { x: 10, y: 20 }
+    let p2: Point = Point { x: 5, y: 15 }
+    let p3: Point = p1 + p2
+    p3.x + p3.y
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 50  # (10+5) + (20+15) = 15 + 35 = 50
+
+  def test_operator_overload_sub(self):
+    """Test overloading the - operator for a struct."""
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn __sub__(self: Point, other: Point) -> Point:
+        Point { x: self.x - other.x, y: self.y - other.y }
+
+fn main() -> i64:
+    let p1: Point = Point { x: 20, y: 30 }
+    let p2: Point = Point { x: 5, y: 10 }
+    let p3: Point = p1 - p2
+    p3.x + p3.y
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 35  # (20-5) + (30-10) = 15 + 20 = 35
+
+  def test_operator_overload_mul(self):
+    """Test overloading the * operator for scalar multiplication."""
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn __mul__(self: Point, scalar: i64) -> Point:
+        Point { x: self.x * scalar, y: self.y * scalar }
+
+fn main() -> i64:
+    let p: Point = Point { x: 3, y: 4 }
+    let scaled: Point = p * 5
+    scaled.x + scaled.y
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 35  # (3*5) + (4*5) = 15 + 20 = 35
+
+  def test_operator_overload_eq(self):
+    """Test overloading the == operator."""
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn __eq__(self: Point, other: Point) -> bool:
+        self.x == other.x and self.y == other.y
+
+fn main() -> i64:
+    let p1: Point = Point { x: 5, y: 10 }
+    let p2: Point = Point { x: 5, y: 10 }
+    let p3: Point = Point { x: 1, y: 2 }
+    if p1 == p2:
+        if p1 == p3:
+            0
+        else:
+            1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1  # p1 == p2 is true, p1 == p3 is false
+
+  def test_operator_overload_ne(self):
+    """Test overloading the != operator."""
+    source = """struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn __ne__(self: Point, other: Point) -> bool:
+        self.x != other.x or self.y != other.y
+
+fn main() -> i64:
+    let p1: Point = Point { x: 5, y: 10 }
+    let p2: Point = Point { x: 5, y: 10 }
+    let p3: Point = Point { x: 1, y: 2 }
+    if p1 != p3:
+        if p1 != p2:
+            0
+        else:
+            1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1  # p1 != p3 is true, p1 != p2 is false
+
+  def test_operator_overload_lt(self):
+    """Test overloading the < operator."""
+    source = """struct Wrapper:
+    value: i64
+
+impl Wrapper:
+    fn __lt__(self: Wrapper, other: Wrapper) -> bool:
+        self.value < other.value
+
+fn main() -> i64:
+    let a: Wrapper = Wrapper { value: 5 }
+    let b: Wrapper = Wrapper { value: 10 }
+    if a < b:
+        1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1  # 5 < 10 is true
+
+  def test_operator_overload_le(self):
+    """Test overloading the <= operator."""
+    source = """struct Wrapper:
+    value: i64
+
+impl Wrapper:
+    fn __le__(self: Wrapper, other: Wrapper) -> bool:
+        self.value <= other.value
+
+fn main() -> i64:
+    let a: Wrapper = Wrapper { value: 5 }
+    let b: Wrapper = Wrapper { value: 5 }
+    let c: Wrapper = Wrapper { value: 10 }
+    if a <= b and b <= c:
+        1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1  # 5 <= 5 and 5 <= 10
+
+  def test_operator_overload_gt(self):
+    """Test overloading the > operator."""
+    source = """struct Wrapper:
+    value: i64
+
+impl Wrapper:
+    fn __gt__(self: Wrapper, other: Wrapper) -> bool:
+        self.value > other.value
+
+fn main() -> i64:
+    let a: Wrapper = Wrapper { value: 10 }
+    let b: Wrapper = Wrapper { value: 5 }
+    if a > b:
+        1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1  # 10 > 5 is true
+
+  def test_operator_overload_ge(self):
+    """Test overloading the >= operator."""
+    source = """struct Wrapper:
+    value: i64
+
+impl Wrapper:
+    fn __ge__(self: Wrapper, other: Wrapper) -> bool:
+        self.value >= other.value
+
+fn main() -> i64:
+    let a: Wrapper = Wrapper { value: 10 }
+    let b: Wrapper = Wrapper { value: 10 }
+    let c: Wrapper = Wrapper { value: 5 }
+    if a >= b and a >= c:
+        1
+    else:
+        0
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 1  # 10 >= 10 and 10 >= 5
+
+  def test_operator_overload_chained(self):
+    """Test chaining overloaded operators."""
+    source = """struct Vec2:
+    x: i64
+    y: i64
+
+impl Vec2:
+    fn __add__(self: Vec2, other: Vec2) -> Vec2:
+        Vec2 { x: self.x + other.x, y: self.y + other.y }
+
+fn main() -> i64:
+    let a: Vec2 = Vec2 { x: 1, y: 2 }
+    let b: Vec2 = Vec2 { x: 3, y: 4 }
+    let c: Vec2 = Vec2 { x: 5, y: 6 }
+    let d: Vec2 = a + b + c
+    d.x + d.y
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 21  # (1+3+5) + (2+4+6) = 9 + 12 = 21
+
+  def test_operator_overload_in_expression(self):
+    """Test using overloaded operators in complex expressions."""
+    source = """struct Counter:
+    count: i64
+
+impl Counter:
+    fn __add__(self: Counter, other: Counter) -> Counter:
+        Counter { count: self.count + other.count }
+
+fn main() -> i64:
+    let c1: Counter = Counter { count: 10 }
+    let c2: Counter = Counter { count: 20 }
+    let c3: Counter = Counter { count: 30 }
+    let result: Counter = c1 + c2
+    let final_result: Counter = result + c3
+    final_result.count
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 60  # 10 + 20 + 30 = 60
+
+  def test_operator_overload_mixed_with_builtin(self):
+    """Test operator overloading alongside built-in operators."""
+    source = """struct Value:
+    n: i64
+
+impl Value:
+    fn __add__(self: Value, other: Value) -> Value:
+        Value { n: self.n + other.n }
+
+fn main() -> i64:
+    let v1: Value = Value { n: 5 }
+    let v2: Value = Value { n: 3 }
+    let sum: Value = v1 + v2
+    sum.n + 10 + 20
+"""
+    exit_code, _ = self._compile_and_run(source)
+    assert exit_code == 38  # (5+3) + 10 + 20 = 8 + 30 = 38

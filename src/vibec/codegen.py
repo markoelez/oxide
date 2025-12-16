@@ -195,6 +195,8 @@ class CodeGenerator:
     self.closure_counter = 0
     # Function parameter names: function_name -> list of param names (for kwargs resolution)
     self.function_params: dict[str, list[str]] = {}
+    # Operator overloads: id(BinaryExpr) -> (left_type, right_type, method_name, return_type)
+    self.operator_overloads: dict[int, tuple[str, str, str, str]] = {}
 
   def _emit(self, line: str) -> None:
     self.output.append(line)
@@ -417,6 +419,10 @@ class CodeGenerator:
         asm_label = self._mangle_generic_name(mangled_name)
         # Remove leading _ since _gen_method_call adds it
         self.struct_methods[struct_mangled][inst_method.original_method.name] = asm_label[1:]
+
+    # Register operator overloads from type checker
+    if type_check_result:
+      self.operator_overloads = type_check_result.operator_overloads
 
     # Register function parameter names (for kwargs resolution) - skip generic functions
     for func in program.functions:
@@ -827,6 +833,13 @@ class CodeGenerator:
         if reg_idx + 1 < 8:
           self._emit(f"    str x{reg_idx + 1}, [x29, #{offset - 8}]")  # Payload
         reg_idx += 2
+      elif type_str in self.structs:
+        # Struct parameter: store each field from separate registers
+        num_fields = len(self.structs[type_str])
+        for i in range(num_fields):
+          if reg_idx < 8:
+            self._emit(f"    str x{reg_idx}, [x29, #{offset - i * 8}]")
+          reg_idx += 1
       else:
         if reg_idx < 8:
           self._emit(f"    str x{reg_idx}, [x29, #{offset}]")
@@ -917,30 +930,19 @@ class CodeGenerator:
               for i in range(len(fields)):
                 self._emit(f"    ldr x0, [x29, #{src_offset - i * 8}]")
                 self._emit(f"    str x0, [x29, #{offset - i * 8}]")
-            case CallExpr(_, _, _) | MethodCallExpr(_, _, _):
-              # Function/method call returning a struct
-              # For single-field structs, the value is returned in x0
+            case CallExpr(_, _, _, _) | MethodCallExpr(_, _, _) | BinaryExpr(_, _, _):
+              # Function/method call or binary expression returning a struct
               # For multi-field structs, values are returned in x0, x1, x2, ...
               self._gen_expr(value)
-              # Store returned value(s) - for now assume single field
-              # TODO: handle multi-field struct returns properly
-              if len(fields) == 1:
-                self._emit(f"    str x0, [x29, #{offset}]")
-              else:
-                # For multi-field, the return is currently just x0
-                # Store it in first slot, zero others
-                self._emit(f"    str x0, [x29, #{offset}]")
-                for i in range(1, len(fields)):
-                  self._emit(f"    str xzr, [x29, #{offset - i * 8}]")
+              # Store returned value(s) from registers x0, x1, x2, ...
+              for i in range(len(fields)):
+                self._emit(f"    str x{i}, [x29, #{offset - i * 8}]")
             case _:
               # Other expressions - evaluate and store
+              # Struct values are returned in multiple registers
               self._gen_expr(value)
-              if len(fields) == 1:
-                self._emit(f"    str x0, [x29, #{offset}]")
-              else:
-                self._emit(f"    str x0, [x29, #{offset}]")
-                for i in range(1, len(fields)):
-                  self._emit(f"    str xzr, [x29, #{offset - i * 8}]")
+              for i in range(len(fields)):
+                self._emit(f"    str x{i}, [x29, #{offset - i * 8}]")
           self.next_slot += len(fields)
 
         elif is_tuple_type(type_str):
@@ -1200,53 +1202,59 @@ class CodeGenerator:
           self._emit(f"    ldr x1, [x29, #{offset - 8}]")
 
       case BinaryExpr(left, op, right):
-        # Evaluate left to x0, push to stack
-        self._gen_expr(left)
-        self._emit("    str x0, [sp, #-16]!")
+        # Check for operator overloading
+        expr_id = id(expr)
+        if expr_id in self.operator_overloads:
+          left_type, right_type, method_name, _ = self.operator_overloads[expr_id]
+          self._gen_operator_call(left, right, left_type, right_type, method_name)
+        else:
+          # Evaluate left to x0, push to stack
+          self._gen_expr(left)
+          self._emit("    str x0, [sp, #-16]!")
 
-        # Evaluate right to x0
-        self._gen_expr(right)
-        self._emit("    mov x1, x0")
+          # Evaluate right to x0
+          self._gen_expr(right)
+          self._emit("    mov x1, x0")
 
-        # Pop left to x0
-        self._emit("    ldr x0, [sp], #16")
+          # Pop left to x0
+          self._emit("    ldr x0, [sp], #16")
 
-        # Apply operator
-        match op:
-          case "+":
-            self._emit("    add x0, x0, x1")
-          case "-":
-            self._emit("    sub x0, x0, x1")
-          case "*":
-            self._emit("    mul x0, x0, x1")
-          case "/":
-            self._emit("    sdiv x0, x0, x1")
-          case "%":
-            # x0 = x0 - (x0 / x1) * x1
-            self._emit("    sdiv x2, x0, x1")
-            self._emit("    msub x0, x2, x1, x0")
-          case "<":
-            self._emit("    cmp x0, x1")
-            self._emit("    cset x0, lt")
-          case ">":
-            self._emit("    cmp x0, x1")
-            self._emit("    cset x0, gt")
-          case "<=":
-            self._emit("    cmp x0, x1")
-            self._emit("    cset x0, le")
-          case ">=":
-            self._emit("    cmp x0, x1")
-            self._emit("    cset x0, ge")
-          case "==":
-            self._emit("    cmp x0, x1")
-            self._emit("    cset x0, eq")
-          case "!=":
-            self._emit("    cmp x0, x1")
-            self._emit("    cset x0, ne")
-          case "and":
-            self._emit("    and x0, x0, x1")
-          case "or":
-            self._emit("    orr x0, x0, x1")
+          # Apply operator
+          match op:
+            case "+":
+              self._emit("    add x0, x0, x1")
+            case "-":
+              self._emit("    sub x0, x0, x1")
+            case "*":
+              self._emit("    mul x0, x0, x1")
+            case "/":
+              self._emit("    sdiv x0, x0, x1")
+            case "%":
+              # x0 = x0 - (x0 / x1) * x1
+              self._emit("    sdiv x2, x0, x1")
+              self._emit("    msub x0, x2, x1, x0")
+            case "<":
+              self._emit("    cmp x0, x1")
+              self._emit("    cset x0, lt")
+            case ">":
+              self._emit("    cmp x0, x1")
+              self._emit("    cset x0, gt")
+            case "<=":
+              self._emit("    cmp x0, x1")
+              self._emit("    cset x0, le")
+            case ">=":
+              self._emit("    cmp x0, x1")
+              self._emit("    cset x0, ge")
+            case "==":
+              self._emit("    cmp x0, x1")
+              self._emit("    cset x0, eq")
+            case "!=":
+              self._emit("    cmp x0, x1")
+              self._emit("    cset x0, ne")
+            case "and":
+              self._emit("    and x0, x0, x1")
+            case "or":
+              self._emit("    orr x0, x0, x1")
 
       case UnaryExpr(op, operand):
         self._gen_expr(operand)
@@ -1315,8 +1323,7 @@ class CodeGenerator:
         self._gen_method_call(target, method, args)
 
       case StructLiteral(name, type_args, fields):
-        # Struct literal outside of let: allocate temp and return address
-        # This is uncommon, but we can handle it
+        # Struct literal outside of let: evaluate fields and return in registers
         # Resolve mangled struct name for generic structs
         struct_name = name
         if type_args:
@@ -1331,18 +1338,17 @@ class CodeGenerator:
           struct_name = f"{name}<{','.join(resolved_type_args)}>"
         struct_fields = self.structs[struct_name]
         value_map = dict(fields)
-        # Store fields on stack temporarily
+        # Store fields on stack temporarily (in order)
         for i, (field_name, _) in enumerate(struct_fields):
           if field_name in value_map:
             self._gen_expr(value_map[field_name])
             self._emit("    str x0, [sp, #-16]!")
           else:
             self._emit("    str xzr, [sp, #-16]!")
-        # Load first field's value as result (or return 0)
-        if struct_fields:
-          self._emit(f"    ldr x0, [sp, #{(len(struct_fields) - 1) * 16}]")
-        else:
-          self._emit("    mov x0, #0")
+        # Load fields into registers x0, x1, x2, ... for return
+        # Note: fields are pushed in order, so the last field is at [sp], first at [sp + (n-1)*16]
+        for i in range(len(struct_fields)):
+          self._emit(f"    ldr x{i}, [sp, #{(len(struct_fields) - 1 - i) * 16}]")
         # Clean up stack
         self._emit(f"    add sp, sp, #{len(struct_fields) * 16}")
 
@@ -2346,6 +2352,99 @@ class CodeGenerator:
     self._emit(f"{slice_done}:")
     self._emit("    ldr x0, [sp]")  # Return new vec ptr
     self._emit("    add sp, sp, #64")  # Clean up stack (48 + 16)
+
+  def _gen_operator_call(self, left: Expr, right: Expr, left_type: str, right_type: str, method_name: str) -> None:
+    """Generate code for an overloaded binary operator (calls a struct method)."""
+    # Get struct fields and method
+    left_fields = self.structs[left_type]
+    mangled_name = self.struct_methods[left_type][method_name]
+
+    # Determine if right is a struct type
+    right_is_struct = right_type in self.structs
+    right_fields = self.structs.get(right_type, [])
+    right_num_slots = len(right_fields) if right_is_struct else 1
+
+    # For operator overload, left operand is 'self' (the struct), right is 'other'
+    # We need to pass all fields of self, then all fields of other (or just the value for non-structs)
+    #
+    # Strategy: Evaluate left first (may use stack), save result, then evaluate right,
+    # then push everything onto stack in correct order, then pop into registers.
+
+    # Step 1: Evaluate left operand and save to a temp area on stack
+    left_is_var = isinstance(left, VarExpr)
+    left_offset = 0
+    if left_is_var:
+      left_offset, _ = self.locals[left.name]
+    else:
+      # Evaluate left expression - result is in x0, x1, ... for multi-field structs
+      self._gen_expr(left)
+      # Save left result to stack (we'll copy it later)
+      for i in range(len(left_fields)):
+        self._emit(f"    str x{i}, [sp, #-16]!")
+
+    # Step 2: Evaluate right operand and push onto stack (in reverse field order for final layout)
+    right_is_var = isinstance(right, VarExpr)
+    if right_is_var:
+      right_offset, _ = self.locals[right.name]
+      if right_is_struct:
+        for i in range(len(right_fields) - 1, -1, -1):
+          self._emit(f"    ldr x0, [x29, #{right_offset - i * 8}]")
+          self._emit("    str x0, [sp, #-16]!")
+      else:
+        self._emit(f"    ldr x0, [x29, #{right_offset}]")
+        self._emit("    str x0, [sp, #-16]!")
+    else:
+      # Evaluate right expression - result is in x0, x1, ... for multi-field structs
+      self._gen_expr(right)
+      if right_is_struct:
+        # Push all struct fields (in reverse order)
+        for i in range(len(right_fields) - 1, -1, -1):
+          self._emit(f"    str x{i}, [sp, #-16]!")
+      else:
+        self._emit("    str x0, [sp, #-16]!")
+
+    # Step 3: Push left operand onto stack (in reverse field order)
+    if left_is_var:
+      for i in range(len(left_fields) - 1, -1, -1):
+        self._emit(f"    ldr x0, [x29, #{left_offset - i * 8}]")
+        self._emit("    str x0, [sp, #-16]!")
+    else:
+      # Left result is saved on stack, reload and push in reverse order
+      # After pushing x0, x1 (left result) and then pushing right operand fields:
+      #   x0 was pushed first, so it's at the highest address (furthest from sp)
+      #   x1 was pushed second, etc.
+      # After pushing right_num_slots values, the layout from current sp is:
+      #   [sp + right_num_slots * 16 + (left_num - 1) * 16] = first pushed = field 0
+      #   [sp + right_num_slots * 16 + (left_num - 2) * 16] = second pushed = field 1
+      #   ...
+      #   [sp + right_num_slots * 16] = last pushed = field (left_num - 1)
+      # We need to push in reverse field order: push field (left_num-1), ..., field 1, field 0
+      # So load all first into temp registers, then push in reverse order
+      base_offset = right_num_slots * 16
+      # Load all left fields into temp registers x9, x10, ... (up to 8 fields max)
+      for i in range(len(left_fields)):
+        # field i is at base_offset + (left_num - 1 - i) * 16
+        offset = base_offset + (len(left_fields) - 1 - i) * 16
+        self._emit(f"    ldr x{9 + i}, [sp, #{offset}]")
+      # Push in reverse order: field (left_num-1) first, then field (left_num-2), ..., field 0
+      for i in range(len(left_fields) - 1, -1, -1):
+        self._emit(f"    str x{9 + i}, [sp, #-16]!")
+
+    # Step 4: Pop into registers: left fields first, then right fields
+    reg_idx = 0
+    for _ in left_fields:
+      self._emit(f"    ldr x{reg_idx}, [sp], #16")
+      reg_idx += 1
+    for _ in range(right_num_slots):
+      self._emit(f"    ldr x{reg_idx}, [sp], #16")
+      reg_idx += 1
+
+    # Step 5: Clean up the saved left result if we evaluated left expression
+    if not left_is_var:
+      self._emit(f"    add sp, sp, #{len(left_fields) * 16}")
+
+    # Call the method
+    self._emit(f"    bl _{mangled_name}")
 
   def _gen_method_call(self, target: Expr, method: str, args: tuple[Expr, ...]) -> None:
     """Generate code for method calls on lists/arrays."""

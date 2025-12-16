@@ -67,6 +67,25 @@ class TypeError(Exception):
   pass
 
 
+# Operator to method name mapping for operator overloading
+OPERATOR_METHODS: dict[str, str] = {
+  "+": "__add__",
+  "-": "__sub__",
+  "*": "__mul__",
+  "/": "__div__",
+  "%": "__mod__",
+  "==": "__eq__",
+  "!=": "__ne__",
+  "<": "__lt__",
+  ">": "__gt__",
+  "<=": "__le__",
+  ">=": "__ge__",
+}
+
+# Return type for comparison operators (must return bool)
+COMPARISON_OPERATORS = {"==", "!=", "<", ">", "<=", ">="}
+
+
 @dataclass
 class FunctionSignature:
   """Stores a function's type signature."""
@@ -392,6 +411,8 @@ class TypeChecker:
     self.current_type_subst: dict[str, str] = {}
     # Inferred generic calls: id(CallExpr) -> mangled_name (for AST transformation)
     self.inferred_calls: dict[int, str] = {}
+    # Operator overloads: id(BinaryExpr) -> (left_type, right_type, method_name, return_type)
+    self.operator_overloads: dict[int, tuple[str, str, str, str]] = {}
 
   def _resolve_generic_struct(self, name: str, type_args: tuple[TypeAnnotation, ...]) -> str:
     """Resolve a generic struct instantiation to its monomorphized name."""
@@ -1695,28 +1716,59 @@ class TypeChecker:
         left_type = self._check_expr(left)
         right_type = self._check_expr(right)
 
+        # Logical operators: bool -> bool (always use built-in)
+        if op in ("and", "or"):
+          if left_type != "bool" or right_type != "bool":
+            raise TypeError(f"Logical operator '{op}' requires bool operands")
+          return "bool"
+
+        # Check for operator overloading on struct types
+        if op in OPERATOR_METHODS:
+          method_name = OPERATOR_METHODS[op]
+
+          # Check if left_type is a struct with the operator method
+          if left_type in self.struct_methods and method_name in self.struct_methods[left_type]:
+            sig = self.struct_methods[left_type][method_name]
+
+            # Validate: method should take self + one argument
+            if len(sig.param_types) != 2:
+              raise TypeError(f"Operator method '{method_name}' must take exactly 2 parameters (self, other)")
+
+            # First param is self (should match left_type)
+            if sig.param_types[0] != left_type:
+              raise TypeError(f"Operator method '{method_name}' first parameter must be {left_type}")
+
+            # Second param is the right operand
+            expected_right = sig.param_types[1]
+            if right_type != expected_right:
+              raise TypeError(f"Operator '{op}' expects {expected_right} on right, got {right_type}")
+
+            # For comparison operators, return type must be bool
+            if op in COMPARISON_OPERATORS and sig.return_type != "bool":
+              raise TypeError(f"Comparison operator '{method_name}' must return bool, got {sig.return_type}")
+
+            # Record this as an operator overload for codegen
+            # Store: (left_type, right_type, method_name, return_type)
+            self.operator_overloads[id(expr)] = (left_type, expected_right, method_name, sig.return_type)
+
+            return sig.return_type
+
         # Arithmetic operators: i64 -> i64
         if op in ("+", "-", "*", "/", "%"):
           if left_type != "i64" or right_type != "i64":
-            raise TypeError(f"Arithmetic operator '{op}' requires i64 operands")
+            raise TypeError(f"Arithmetic operator '{op}' requires i64 operands, got {left_type} and {right_type}")
           return "i64"
 
         # Comparison operators: i64 -> bool
         if op in ("<", ">", "<=", ">="):
           if left_type != "i64" or right_type != "i64":
-            raise TypeError(f"Comparison operator '{op}' requires i64 operands")
+            raise TypeError(f"Comparison operator '{op}' requires i64 operands, got {left_type} and {right_type}")
           return "bool"
 
         # Equality operators: same type -> bool
         if op in ("==", "!="):
           if left_type != right_type:
             raise TypeError(f"Cannot compare {left_type} with {right_type}")
-          return "bool"
-
-        # Logical operators: bool -> bool
-        if op in ("and", "or"):
-          if left_type != "bool" or right_type != "bool":
-            raise TypeError(f"Logical operator '{op}' requires bool operands")
           return "bool"
 
         raise TypeError(f"Unknown operator '{op}'")
@@ -2656,6 +2708,8 @@ class TypeCheckResult:
   instantiated_functions: dict[str, InstantiatedFunction]
   # Instantiated generic methods: mangled_name -> InstantiatedMethod
   instantiated_methods: dict[str, InstantiatedMethod]
+  # Operator overloads: id(BinaryExpr) -> (left_type, right_type, method_name, return_type)
+  operator_overloads: dict[int, tuple[str, str, str, str]]
 
 
 def check(program: Program) -> tuple[Program, TypeCheckResult]:
@@ -2692,6 +2746,7 @@ def check(program: Program) -> tuple[Program, TypeCheckResult]:
     instantiated_enums,
     checker.instantiated_functions,
     checker.instantiated_methods,
+    checker.operator_overloads,
   )
 
   return transformed_program, type_check_result

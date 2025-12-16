@@ -34,6 +34,7 @@ examples/constants
 examples/type_aliases
 examples/generics
 examples/slices
+examples/operator_overloading
 
 # uv lock file
 uv.lock

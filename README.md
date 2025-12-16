@@ -279,6 +279,74 @@ fn main() -> i64:
     0
 ```
 
+**Operator Overloading (like Rust/C++):**
+```
+struct Vec2:
+    x: i64
+    y: i64
+
+impl Vec2:
+    # Implement + operator
+    fn __add__(self: Vec2, other: Vec2) -> Vec2:
+        Vec2 { x: self.x + other.x, y: self.y + other.y }
+    
+    # Implement - operator
+    fn __sub__(self: Vec2, other: Vec2) -> Vec2:
+        Vec2 { x: self.x - other.x, y: self.y - other.y }
+    
+    # Implement * operator (scalar multiplication)
+    fn __mul__(self: Vec2, scalar: i64) -> Vec2:
+        Vec2 { x: self.x * scalar, y: self.y * scalar }
+    
+    # Implement == operator
+    fn __eq__(self: Vec2, other: Vec2) -> bool:
+        self.x == other.x and self.y == other.y
+    
+    # Implement < operator (comparison by magnitude)
+    fn __lt__(self: Vec2, other: Vec2) -> bool:
+        self.x * self.x + self.y * self.y < other.x * other.x + other.y * other.y
+
+fn main() -> i64:
+    let a: Vec2 = Vec2 { x: 1, y: 2 }
+    let b: Vec2 = Vec2 { x: 3, y: 4 }
+    
+    let c: Vec2 = a + b  # Uses __add__
+    print(c.x)  # 4
+    print(c.y)  # 6
+    
+    let d: Vec2 = b - a  # Uses __sub__
+    print(d.x)  # 2
+    
+    let e: Vec2 = a * 3  # Uses __mul__
+    print(e.x)  # 3
+    
+    # Chained operators work
+    let f: Vec2 = a + b + c
+    print(f.x)  # 8
+    
+    # Comparison operators
+    if a == a:
+        print(1)  # true
+    
+    if a < b:  # Compare by magnitude
+        print(2)  # true
+    
+    0
+```
+
+Supported operator methods:
+- `__add__` for `+`
+- `__sub__` for `-`
+- `__mul__` for `*`
+- `__div__` for `/`
+- `__mod__` for `%`
+- `__eq__` for `==`
+- `__ne__` for `!=`
+- `__lt__` for `<`
+- `__gt__` for `>`
+- `__le__` for `<=`
+- `__ge__` for `>=`
+
 **Functional Iterator Methods:**
 ```
 fn main() -> i64:
@@ -342,7 +410,7 @@ fn main() -> i64:
     return 0
 ```
 
-**Supported:** generics (structs, enums, functions, impl blocks) with type inference, type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, slice syntax (`v[1:3]`, `v[::2]`, negative indices), chained comparisons (`0 < x < 10`), pattern guards (`Some(x) if x > 0:`), `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
+**Supported:** operator overloading (`__add__`, `__eq__`, etc.), generics (structs, enums, functions, impl blocks) with type inference, type aliases, `const` declarations, hashmaps with dict comprehensions (`dict[K,V]`), list comprehensions, slice syntax (`v[1:3]`, `v[::2]`, negative indices), chained comparisons (`0 < x < 10`), pattern guards (`Some(x) if x > 0:`), `Result[T, E]` type with `?` operator, functional iterators (`map`, `filter`, `fold`, `skip`, `take`, `sum`), implicit return, ownership & borrowing, enums with `match`, keyword args, structs with `impl`, tuples, arrays, vectors, closures.
 
 
 ## Architecture
@@ -403,7 +471,6 @@ vibec source.vb --keep-asm
 ## Todo
 
 - Traits (rust)
-- Operator Overloading (Rust/C++) 
 - ? for Option Types (Rust)
 - Default Parameter Values (Python)
 - String Interpolation / F-strings (Python)

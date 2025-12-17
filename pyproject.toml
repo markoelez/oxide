@@ -17,7 +17,7 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.8.0",
     "pre-commit>=4.0.0",
-    "pyright>=1.1.0",
+    "ty>=0.0.1a7",
 ]
 
 [build-system]
@@ -29,7 +29,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
-[tool.pyright]
-include = ["src"]
-pythonVersion = "3.12"
-typeCheckingMode = "standard"
+[tool.ty.src]
+root = "src"
+
+[tool.ty.environment]
+python-version = "3.12"

@@ -318,7 +318,6 @@ class Parser:
 
     # Save position
     saved_pos = self.pos
-    depth = 0
     self._advance()  # consume '<'
     depth = 1
 

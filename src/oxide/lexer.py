@@ -49,7 +49,11 @@ class Lexer:
   def _advance(self) -> str:
     ch = self._current()
     self.pos += 1
-    self.line, self.column = (self.line + 1, 1) if ch == "\n" else (self.line, self.column + 1)
+    if ch == "\n":
+      self.line += 1
+      self.column = 1
+    else:
+      self.column += 1
     return ch
 
   def _emit(self, type: TokenType, value: str, line: int, col: int) -> None:

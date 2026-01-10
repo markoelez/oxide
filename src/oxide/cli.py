@@ -47,23 +47,21 @@ def main() -> int:
 
   if args.emit_asm:
     result = compiler.compile_to_asm(source)
-    if result.success:
-      if args.output:
-        args.output.write_text(result.assembly)
-      else:
-        print(result.assembly)
-      return 0
-    else:
+    if not result.success:
       print(f"Error: {result.error}", file=sys.stderr)
       return 1
-  else:
-    result = compiler.compile_to_binary(source, output_path, keep_asm=args.keep_asm)
-    if result.success:
-      print(f"Compiled to {output_path}")
-      return 0
+    if args.output:
+      args.output.write_text(result.assembly)
     else:
-      print(f"Error: {result.error}", file=sys.stderr)
-      return 1
+      print(result.assembly)
+    return 0
+
+  result = compiler.compile_to_binary(source, output_path, keep_asm=args.keep_asm)
+  if not result.success:
+    print(f"Error: {result.error}", file=sys.stderr)
+    return 1
+  print(f"Compiled to {output_path}")
+  return 0
 
 
 if __name__ == "__main__":

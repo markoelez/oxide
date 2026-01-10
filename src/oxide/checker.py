@@ -144,12 +144,12 @@ def is_dict_type(type_str: str) -> bool:
   return type_str.startswith("dict[")
 
 
-def get_dict_key_type(type_str: str) -> str | None:
-  """Extract key type from dict type string like dict[i64,str] -> i64."""
-  if not is_dict_type(type_str):
-    return None
-  inner = type_str[5:-1]  # Remove "dict[" and "]"
-  # Find the comma that separates key and value types (handle nested types)
+def _find_comma_at_depth_zero(inner: str) -> int | None:
+  """Find the index of the first comma at depth 0 in a type string.
+
+  This handles nested types like dict[vec[i64],str] correctly by tracking
+  bracket depth.
+  """
   depth = 0
   for i, c in enumerate(inner):
     if c in "([":
@@ -157,8 +157,17 @@ def get_dict_key_type(type_str: str) -> str | None:
     elif c in ")]":
       depth -= 1
     elif c == "," and depth == 0:
-      return inner[:i]
+      return i
   return None
+
+
+def get_dict_key_type(type_str: str) -> str | None:
+  """Extract key type from dict type string like dict[i64,str] -> i64."""
+  if not is_dict_type(type_str):
+    return None
+  inner = type_str[5:-1]  # Remove "dict[" and "]"
+  comma_idx = _find_comma_at_depth_zero(inner)
+  return inner[:comma_idx] if comma_idx is not None else None
 
 
 def get_dict_value_type(type_str: str) -> str | None:
@@ -166,16 +175,8 @@ def get_dict_value_type(type_str: str) -> str | None:
   if not is_dict_type(type_str):
     return None
   inner = type_str[5:-1]  # Remove "dict[" and "]"
-  # Find the comma that separates key and value types (handle nested types)
-  depth = 0
-  for i, c in enumerate(inner):
-    if c in "([":
-      depth += 1
-    elif c in ")]":
-      depth -= 1
-    elif c == "," and depth == 0:
-      return inner[i + 1 :]
-  return None
+  comma_idx = _find_comma_at_depth_zero(inner)
+  return inner[comma_idx + 1 :] if comma_idx is not None else None
 
 
 def is_tuple_type(type_str: str) -> bool:
@@ -270,16 +271,8 @@ def get_result_ok_type(type_str: str) -> str | None:
   if not is_result_type(type_str):
     return None
   inner = type_str[7:-1]  # Remove "Result[" and "]"
-  # Find the comma that separates Ok and Err types (handle nested types)
-  depth = 0
-  for i, c in enumerate(inner):
-    if c in "([":
-      depth += 1
-    elif c in ")]":
-      depth -= 1
-    elif c == "," and depth == 0:
-      return inner[:i]
-  return None
+  comma_idx = _find_comma_at_depth_zero(inner)
+  return inner[:comma_idx] if comma_idx is not None else None
 
 
 def get_result_err_type(type_str: str) -> str | None:
@@ -287,16 +280,8 @@ def get_result_err_type(type_str: str) -> str | None:
   if not is_result_type(type_str):
     return None
   inner = type_str[7:-1]  # Remove "Result[" and "]"
-  # Find the comma that separates Ok and Err types (handle nested types)
-  depth = 0
-  for i, c in enumerate(inner):
-    if c in "([":
-      depth += 1
-    elif c in ")]":
-      depth -= 1
-    elif c == "," and depth == 0:
-      return inner[i + 1 :]
-  return None
+  comma_idx = _find_comma_at_depth_zero(inner)
+  return inner[comma_idx + 1 :] if comma_idx is not None else None
 
 
 def result_types_compatible(actual: str, expected: str) -> bool:
